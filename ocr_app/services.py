@@ -748,4 +748,374 @@ class ExportService:
         
         from django.template import Template, Context
         t = Template(template)
-        return t.render(Context(context)) 
+        return t.render(Context(context))
+    
+    def export_projects_vlamy(self, projects, export_id):
+        """Export multiple projects in VLAMy format"""
+        import uuid
+        unique_id = str(uuid.uuid4())[:8]
+        
+        # Create temporary directory for ZIP contents
+        temp_dir = os.path.join(self.export_dir, f"temp_vlamy_{export_id}_{datetime.now().timestamp()}")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        try:
+            # Process each project
+            for project in projects:
+                # Create project directory
+                project_dir = os.path.join(temp_dir, self._sanitize_filename(project.name))
+                os.makedirs(project_dir, exist_ok=True)
+                
+                # Create page directory for PageXML files
+                page_dir = os.path.join(project_dir, 'page')
+                os.makedirs(page_dir, exist_ok=True)
+                
+                # Process all images in all documents of this project
+                for document in project.documents.all():
+                    for image in document.images.all().order_by('order'):
+                        # Copy original image to project root
+                        if image.image_file and default_storage.exists(image.image_file.name):
+                            # Use original filename or create a clean one
+                            image_filename = image.original_filename
+                            if not image_filename:
+                                image_filename = f"{image.name}.jpg"
+                            
+                            # Ensure unique filename if there are duplicates
+                            image_path = os.path.join(project_dir, image_filename)
+                            counter = 1
+                            base_name, ext = os.path.splitext(image_filename)
+                            while os.path.exists(image_path):
+                                image_filename = f"{base_name}_{counter}{ext}"
+                                image_path = os.path.join(project_dir, image_filename)
+                                counter += 1
+                            
+                            with default_storage.open(image.image_file.name, 'rb') as src:
+                                with open(image_path, 'wb') as dst:
+                                    dst.write(src.read())
+                            
+                            # Create PageXML file for this image
+                            pagexml_filename = f"{os.path.splitext(image_filename)[0]}.xml"
+                            pagexml_path = os.path.join(page_dir, pagexml_filename)
+                            
+                            # Generate PageXML content for this image
+                            pagexml_content = self._generate_pagexml_for_image(image, image_filename)
+                            
+                            with open(pagexml_path, 'w', encoding='utf-8') as f:
+                                f.write(pagexml_content)
+                
+                # Create project metadata JSON
+                project_metadata = self._create_project_metadata(project)
+                metadata_path = os.path.join(project_dir, 'metadata.json')
+                with open(metadata_path, 'w', encoding='utf-8') as f:
+                    json.dump(project_metadata, f, indent=2, ensure_ascii=False)
+            
+            # Create ZIP file
+            zip_filename = f"vlamy_export_{unique_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+            zip_filepath = os.path.join(self.export_dir, zip_filename)
+            
+            with zipfile.ZipFile(zip_filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, dirs, files in os.walk(temp_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        # Get relative path for ZIP
+                        rel_path = os.path.relpath(file_path, temp_dir)
+                        zipf.write(file_path, rel_path)
+            
+            return zip_filepath
+            
+        finally:
+            # Clean up temporary directory
+            import shutil
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+    
+    def export_projects_bulk(self, projects, export_format, export_id):
+        """Export multiple projects in specified format (json or pagexml)"""
+        import uuid
+        unique_id = str(uuid.uuid4())[:8]
+        
+        if export_format == 'json':
+            # Create a single JSON file with all projects
+            all_projects_data = {
+                'export_info': {
+                    'export_id': str(export_id),
+                    'unique_id': unique_id,
+                    'exported_at': datetime.now().isoformat(),
+                    'project_count': len(projects),
+                    'format': 'json'
+                },
+                'projects': []
+            }
+            
+            for project in projects:
+                project_data = self._get_project_export_data(project)
+                all_projects_data['projects'].append(project_data)
+            
+            filename = f"bulk_export_{unique_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            filepath = os.path.join(self.export_dir, filename)
+            
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(all_projects_data, f, indent=2, ensure_ascii=False)
+            
+            return filepath
+            
+        elif export_format == 'pagexml':
+            # Create a ZIP file with PageXML for each project
+            temp_dir = os.path.join(self.export_dir, f"temp_bulk_xml_{export_id}_{datetime.now().timestamp()}")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            try:
+                for project in projects:
+                    pagexml_content = self._generate_pagexml_for_project(project)
+                    filename = f"{self._sanitize_filename(project.name)}.xml"
+                    filepath = os.path.join(temp_dir, filename)
+                    
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        f.write(pagexml_content)
+                
+                # Create ZIP file
+                zip_filename = f"bulk_pagexml_export_{unique_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+                zip_filepath = os.path.join(self.export_dir, zip_filename)
+                
+                with zipfile.ZipFile(zip_filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for root, dirs, files in os.walk(temp_dir):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            zipf.write(file_path, file)
+                
+                return zip_filepath
+                
+            finally:
+                # Clean up temporary directory
+                import shutil
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+    
+    def _sanitize_filename(self, filename):
+        """Sanitize filename for cross-platform compatibility"""
+        import re
+        # Remove or replace invalid characters
+        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+        # Remove leading/trailing whitespace and periods
+        filename = filename.strip(' .')
+        # Limit length
+        if len(filename) > 100:
+            filename = filename[:100]
+        return filename or 'unnamed'
+    
+    def _generate_pagexml_for_image(self, image, image_filename):
+        """Generate PageXML content for a single image"""
+        from .models import PAGEXML_MAPPINGS
+        
+        # Get current transcription
+        current_transcription = image.transcriptions.filter(
+            is_current=True, annotation__isnull=True
+        ).first()
+        
+        # Get all annotations with their transcriptions
+        annotations = image.annotations.all().order_by('reading_order')
+        
+        # Build PageXML content
+        pagexml_content = f'''<?xml version="1.0" encoding="UTF-8"?>
+<PcGts xmlns="http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15
+                           http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15/pagecontent.xsd">
+  <Metadata>
+    <Creator>VLAMy OCR Export</Creator>
+    <Created>{datetime.now().isoformat()}</Created>
+    <LastChange>{datetime.now().isoformat()}</LastChange>
+  </Metadata>
+  <Page imageFilename="{image_filename}" imageWidth="{image.width}" imageHeight="{image.height}">'''
+        
+        # Add text regions for annotations
+        region_id = 1
+        for annotation in annotations:
+            annotation_transcription = annotation.transcriptions.filter(is_current=True).first()
+            
+            # Determine region type based on classification
+            region_type = PAGEXML_MAPPINGS.get(annotation.classification, 'TextRegion')
+            
+            pagexml_content += f'''
+    <{region_type} id="region_{region_id:04d}">'''
+            
+            # Add coordinates
+            if annotation.annotation_type == 'bbox':
+                x = annotation.coordinates['x']
+                y = annotation.coordinates['y']
+                width = annotation.coordinates['width']
+                height = annotation.coordinates['height']
+                points = f"{x},{y} {x+width},{y} {x+width},{y+height} {x},{y+height}"
+            elif annotation.annotation_type == 'polygon':
+                points = " ".join([f"{point['x']},{point['y']}" for point in annotation.coordinates['points']])
+            else:
+                points = "0,0 100,0 100,100 0,100"  # Fallback
+            
+            pagexml_content += f'''
+      <Coords points="{points}"/>'''
+            
+            # Add transcription if it's a text region
+            if region_type in ['TextRegion', 'CustomRegion'] and annotation_transcription:
+                pagexml_content += f'''
+      <TextLine id="line_{region_id:04d}_001">
+        <Coords points="{points}"/>
+        <TextEquiv>
+          <Unicode>{self._escape_xml(annotation_transcription.text_content)}</Unicode>
+        </TextEquiv>
+      </TextLine>'''
+            
+            pagexml_content += f'''
+    </{region_type}>'''
+            region_id += 1
+        
+        # Add full image transcription if available and no annotations
+        if current_transcription and not annotations.exists():
+            pagexml_content += f'''
+    <TextRegion id="region_full">
+      <Coords points="0,0 {image.width},0 {image.width},{image.height} 0,{image.height}"/>
+      <TextLine id="line_full_001">
+        <Coords points="0,0 {image.width},0 {image.width},{image.height} 0,{image.height}"/>
+        <TextEquiv>
+          <Unicode>{self._escape_xml(current_transcription.text_content)}</Unicode>
+        </TextEquiv>
+      </TextLine>
+    </TextRegion>'''
+        
+        pagexml_content += '''
+  </Page>
+</PcGts>'''
+        
+        return pagexml_content
+    
+    def _generate_pagexml_for_project(self, project):
+        """Generate PageXML content for an entire project"""
+        pagexml_content = f'''<?xml version="1.0" encoding="UTF-8"?>
+<PcGts xmlns="http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15
+                           http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15/pagecontent.xsd">
+  <Metadata>
+    <Creator>VLAMy OCR Export</Creator>
+    <Created>{datetime.now().isoformat()}</Created>
+    <LastChange>{datetime.now().isoformat()}</LastChange>
+    <Comments>Project: {self._escape_xml(project.name)}</Comments>
+  </Metadata>'''
+        
+        page_id = 1
+        for document in project.documents.all():
+            for image in document.images.all().order_by('order'):
+                pagexml_content += f'''
+  <Page imageFilename="{image.original_filename or image.name}" imageWidth="{image.width}" imageHeight="{image.height}" id="page_{page_id:04d}">'''
+                
+                # Add image content (simplified for project-wide export)
+                current_transcription = image.transcriptions.filter(
+                    is_current=True, annotation__isnull=True
+                ).first()
+                
+                if current_transcription:
+                    pagexml_content += f'''
+    <TextRegion id="region_{page_id:04d}_001">
+      <Coords points="0,0 {image.width},0 {image.width},{image.height} 0,{image.height}"/>
+      <TextLine id="line_{page_id:04d}_001">
+        <Coords points="0,0 {image.width},0 {image.width},{image.height} 0,{image.height}"/>
+        <TextEquiv>
+          <Unicode>{self._escape_xml(current_transcription.text_content)}</Unicode>
+        </TextEquiv>
+      </TextLine>
+    </TextRegion>'''
+                
+                pagexml_content += '''
+  </Page>'''
+                page_id += 1
+        
+        pagexml_content += '''
+</PcGts>'''
+        
+        return pagexml_content
+    
+    def _escape_xml(self, text):
+        """Escape XML special characters"""
+        if not text:
+            return ""
+        return (text.replace("&", "&amp;")
+                   .replace("<", "&lt;")
+                   .replace(">", "&gt;")
+                   .replace('"', "&quot;")
+                   .replace("'", "&apos;"))
+    
+    def _create_project_metadata(self, project):
+        """Create metadata for a project in the export"""
+        return {
+            'project_id': str(project.id),
+            'name': project.name,
+            'description': project.description,
+            'owner': project.owner.username,
+            'created_at': project.created_at.isoformat(),
+            'updated_at': project.updated_at.isoformat(),
+            'document_count': project.documents.count(),
+            'total_images': sum([doc.images.count() for doc in project.documents.all()]),
+            'export_format': 'vlamy',
+            'exported_at': datetime.now().isoformat()
+        }
+    
+    def _get_project_export_data(self, project):
+        """Get complete project data for JSON export"""
+        documents_data = []
+        for document in project.documents.all():
+            images_data = []
+            for image in document.images.all().order_by('order'):
+                current_transcription = image.transcriptions.filter(
+                    is_current=True, annotation__isnull=True
+                ).first()
+                
+                annotations_data = []
+                for annotation in image.annotations.all():
+                    annotation_transcription = annotation.transcriptions.filter(is_current=True).first()
+                    
+                    annotations_data.append({
+                        'id': str(annotation.id),
+                        'type': annotation.annotation_type,
+                        'classification': annotation.classification,
+                        'coordinates': annotation.coordinates,
+                        'label': annotation.label,
+                        'reading_order': annotation.reading_order,
+                        'metadata': annotation.metadata,
+                        'transcription': {
+                            'text': annotation_transcription.text_content if annotation_transcription else '',
+                            'confidence': annotation_transcription.confidence_score if annotation_transcription else None,
+                            'created_at': annotation_transcription.created_at.isoformat() if annotation_transcription else None
+                        } if annotation_transcription else None
+                    })
+                
+                images_data.append({
+                    'id': str(image.id),
+                    'name': image.name,
+                    'original_filename': image.original_filename,
+                    'width': image.width,
+                    'height': image.height,
+                    'order': image.order,
+                    'transcription': {
+                        'text': current_transcription.text_content if current_transcription else '',
+                        'confidence': current_transcription.confidence_score if current_transcription else None,
+                        'created_at': current_transcription.created_at.isoformat() if current_transcription else None
+                    } if current_transcription else None,
+                    'annotations': annotations_data
+                })
+            
+            documents_data.append({
+                'id': str(document.id),
+                'name': document.name,
+                'description': document.description,
+                'reading_order': document.reading_order,
+                'images': images_data
+            })
+        
+        return {
+            'id': str(project.id),
+            'name': project.name,
+            'description': project.description,
+            'owner': project.owner.username,
+            'created_at': project.created_at.isoformat(),
+            'updated_at': project.updated_at.isoformat(),
+            'documents': documents_data
+        } 

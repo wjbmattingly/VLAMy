@@ -48,6 +48,8 @@ urlpatterns = [
     path('export/document/<uuid:document_id>/', views.ExportDocumentView.as_view(), name='export_document'),
     path('export/project/<uuid:project_id>/', views.ExportProjectView.as_view(), name='export_project'),
     path('export/download/<uuid:job_id>/', views.DownloadExportView.as_view(), name='download_export'),
+    path('export/bulk/', views.BulkExportView.as_view(), name='bulk_export'),
+    path('export/projects/', views.ProjectListForExportView.as_view(), name='projects_for_export'),
     
     # Utility endpoints
     path('health/', views.HealthCheckView.as_view(), name='health'),

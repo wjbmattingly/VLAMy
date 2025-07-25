@@ -778,6 +778,116 @@
         </div>
     </div>
 
+    <!-- Export Projects Modal -->
+    <div class="modal fade" id="exportProjectsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-download me-2 text-success"></i>Export Projects
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-info">
+                        <i class="fas fa-info-circle me-2"></i>
+                        <strong>VLAMy Format:</strong> Export includes original images, PageXML files, and JSON metadata in the standard VLAMy export structure.
+                    </div>
+                    
+                    <form id="exportProjectsForm">
+                        <div class="mb-3">
+                            <label class="form-label">Export Format</label>
+                            <select class="form-select" id="exportFormat">
+                                <option value="vlamy" selected>VLAMy Format (ZIP with images + PageXML)</option>
+                                <option value="json">JSON Format (metadata only)</option>
+                                <option value="pagexml">PageXML Format (ZIP)</option>
+                            </select>
+                                                            <div class="form-text">VLAMy format includes images, PageXML, and metadata in the standard structure.</div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">Select Projects to Export</label>
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <small class="text-muted">Choose which projects to include in your export</small>
+                                <div>
+                                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="selectAllProjects()">
+                                        <i class="fas fa-check-square me-1"></i>Select All
+                                    </button>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="clearAllProjects()">
+                                        <i class="fas fa-square me-1"></i>Clear All
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="exportProjectsList" class="border rounded p-3" style="max-height: 300px; overflow-y: auto;">
+                                <!-- Projects will be loaded here -->
+                                <div class="text-center text-muted p-3">
+                                    <i class="fas fa-spinner fa-spin me-2"></i>Loading projects...
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div id="exportProgress" style="display: none;">
+                            <div class="progress mb-3">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%"></div>
+                            </div>
+                            <div id="exportStatus">Preparing export...</div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-success" onclick="startExport()" id="exportButton">
+                        <i class="fas fa-download me-2"></i>Export Selected Projects
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Export Status Modal -->
+    <div class="modal fade" id="exportStatusModal" tabindex="-1" data-bs-backdrop="static">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-download me-2 text-info"></i>Export Status
+                    </h5>
+                </div>
+                <div class="modal-body">
+                    <div class="d-flex align-items-center mb-3">
+                        <div class="spinner-border spinner-border-sm text-primary me-3" role="status" id="exportSpinner">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <div>
+                            <div id="exportStatusText">Processing your export...</div>
+                            <small class="text-muted" id="exportStatusDetail">This may take a few minutes for large projects.</small>
+                        </div>
+                    </div>
+                    <div id="exportResult" style="display: none;">
+                        <div class="alert alert-success">
+                            <i class="fas fa-check-circle me-2"></i>
+                            Export completed successfully!
+                        </div>
+                        <div class="d-grid">
+                            <button class="btn btn-success" onclick="downloadExportFile()" id="downloadButton">
+                                <i class="fas fa-download me-2"></i>Download Export
+                            </button>
+                        </div>
+                    </div>
+                    <div id="exportError" style="display: none;">
+                        <div class="alert alert-danger">
+                            <i class="fas fa-exclamation-triangle me-2"></i>
+                            <span id="exportErrorMessage">Export failed</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="exportCloseButton">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Alert Container -->
     <div id="alertContainer" class="position-fixed top-0 end-0 p-3" style="z-index: 1060;">
         <!-- Alerts will be added here -->

@@ -49,6 +49,9 @@ class OCRApp {
         this.selectedItems = new Set();
         this.pendingDeleteItems = null;
         
+        // Export tracking
+        this.currentExportJob = null;
+        
         this.init();
     }
 
@@ -5002,6 +5005,245 @@ class OCRApp {
             }
         }
     }
+
+    // Export functionality
+    async showExportsModal() {
+        const modal = new bootstrap.Modal(document.getElementById('exportProjectsModal'));
+        
+        // Load projects for export selection
+        await this.loadProjectsForExport();
+        
+        modal.show();
+    }
+
+    async loadProjectsForExport() {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/export/projects/`, {
+                headers: {
+                    'Authorization': `Token ${this.authToken}`
+                }
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                this.renderProjectsForExport(data.projects);
+            } else {
+                throw new Error('Failed to load projects for export');
+            }
+        } catch (error) {
+            console.error('Load projects for export error:', error);
+            document.getElementById('exportProjectsList').innerHTML = 
+                '<div class="text-center text-danger p-3"><i class="fas fa-exclamation-triangle me-2"></i>Failed to load projects</div>';
+        }
+    }
+
+    renderProjectsForExport(projects) {
+        const container = document.getElementById('exportProjectsList');
+        
+        if (projects.length === 0) {
+            container.innerHTML = '<div class="text-center text-muted p-3">No projects available for export</div>';
+            return;
+        }
+
+        let html = '';
+        projects.forEach(project => {
+            html += `
+                <div class="form-check mb-2">
+                    <input class="form-check-input export-project-checkbox" type="checkbox" 
+                           value="${project.id}" id="exportProject_${project.id}">
+                    <label class="form-check-label w-100" for="exportProject_${project.id}">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <strong>${this.escapeHtml(project.name)}</strong>
+                                ${project.is_owner ? '<span class="badge bg-primary ms-2">Owner</span>' : '<span class="badge bg-secondary ms-2">Shared</span>'}
+                                <br>
+                                <small class="text-muted">${this.escapeHtml(project.description || 'No description')}</small>
+                            </div>
+                            <div class="text-end">
+                                <small class="text-muted">
+                                    ${project.document_count} docs, ${project.total_images} images<br>
+                                    Updated: ${new Date(project.updated_at).toLocaleDateString()}
+                                </small>
+                            </div>
+                        </div>
+                    </label>
+                </div>
+            `;
+        });
+
+        container.innerHTML = html;
+    }
+
+    selectAllProjectsForExport() {
+        const checkboxes = document.querySelectorAll('.export-project-checkbox');
+        checkboxes.forEach(checkbox => checkbox.checked = true);
+    }
+
+    clearAllProjectsForExport() {
+        const checkboxes = document.querySelectorAll('.export-project-checkbox');
+        checkboxes.forEach(checkbox => checkbox.checked = false);
+    }
+
+    async startExport() {
+        const selectedProjectIds = Array.from(document.querySelectorAll('.export-project-checkbox:checked'))
+            .map(checkbox => checkbox.value);
+
+        if (selectedProjectIds.length === 0) {
+            this.showAlert('Please select at least one project to export', 'warning');
+            return;
+        }
+
+        const exportFormat = document.getElementById('exportFormat').value;
+
+        // Hide the export projects modal
+        const exportModal = bootstrap.Modal.getInstance(document.getElementById('exportProjectsModal'));
+        exportModal.hide();
+
+        // Show the export status modal
+        const statusModal = new bootstrap.Modal(document.getElementById('exportStatusModal'), {
+            backdrop: 'static',
+            keyboard: false
+        });
+        statusModal.show();
+
+        // Reset status modal
+        document.getElementById('exportSpinner').style.display = 'block';
+        document.getElementById('exportResult').style.display = 'none';
+        document.getElementById('exportError').style.display = 'none';
+        document.getElementById('exportStatusText').textContent = 'Processing your export...';
+        document.getElementById('exportStatusDetail').textContent = 
+            `Exporting ${selectedProjectIds.length} project(s) in ${exportFormat} format. This may take a few minutes.`;
+
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/export/bulk/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({
+                    project_ids: selectedProjectIds,
+                    format: exportFormat
+                })
+            });
+
+            if (response.ok) {
+                const exportJob = await response.json();
+                this.currentExportJob = exportJob;
+
+                // Monitor export status
+                this.monitorExportStatus(exportJob.id);
+            } else {
+                const error = await response.json();
+                throw new Error(error.error || 'Export failed');
+            }
+        } catch (error) {
+            console.error('Export error:', error);
+            
+            document.getElementById('exportSpinner').style.display = 'none';
+            document.getElementById('exportError').style.display = 'block';
+            document.getElementById('exportErrorMessage').textContent = error.message;
+        }
+    }
+
+    async monitorExportStatus(jobId) {
+        const checkStatus = async () => {
+            try {
+                const response = await fetch(`${this.apiBaseUrl}/export-jobs/${jobId}/`, {
+                    headers: {
+                        'Authorization': `Token ${this.authToken}`
+                    }
+                });
+
+                if (response.ok) {
+                    const job = await response.json();
+                    
+                    if (job.status === 'completed') {
+                        document.getElementById('exportSpinner').style.display = 'none';
+                        document.getElementById('exportResult').style.display = 'block';
+                        document.getElementById('exportStatusText').textContent = 'Export completed successfully!';
+                        document.getElementById('exportStatusDetail').textContent = 
+                            `Your export is ready for download (${this.formatFileSize(job.file_size)}).`;
+                        
+                        this.currentExportJob = job;
+                    } else if (job.status === 'failed') {
+                        throw new Error(job.error_message || 'Export failed');
+                    } else {
+                        // Still processing, check again in 2 seconds
+                        setTimeout(checkStatus, 2000);
+                    }
+                } else {
+                    throw new Error('Failed to check export status');
+                }
+            } catch (error) {
+                console.error('Export status check error:', error);
+                
+                document.getElementById('exportSpinner').style.display = 'none';
+                document.getElementById('exportError').style.display = 'block';
+                document.getElementById('exportErrorMessage').textContent = error.message;
+            }
+        };
+
+        // Start checking status
+        setTimeout(checkStatus, 2000);
+    }
+
+    async downloadExportFile() {
+        if (this.currentExportJob && this.currentExportJob.id) {
+            try {
+                const response = await fetch(`${this.apiBaseUrl}/export/download/${this.currentExportJob.id}/`, {
+                    headers: {
+                        'Authorization': `Token ${this.authToken}`
+                    }
+                });
+
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    
+                    // Get filename from Content-Disposition header or use default
+                    const contentDisposition = response.headers.get('Content-Disposition');
+                    let filename = 'export.zip';
+                    if (contentDisposition) {
+                        const matches = /filename="([^"]*)"/.exec(contentDisposition);
+                        if (matches && matches[1]) {
+                            filename = matches[1];
+                        }
+                    }
+                    
+                    // Create temporary download link
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    
+                    // Clean up
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                } else {
+                    throw new Error('Failed to download export file');
+                }
+            } catch (error) {
+                console.error('Download error:', error);
+                this.showAlert('Failed to download export file', 'danger');
+            }
+        }
+    }
+
+    formatFileSize(bytes) {
+        if (!bytes) return '0 B';
+        
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(1024));
+        return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];
+    }
+
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
 }
 
 // Global Functions (called from HTML)
@@ -5025,7 +5267,7 @@ function showProjects() {
 }
 
 function showExports() {
-    // Implementation for exports view
+    app.showExportsModal();
 }
 
 
@@ -5238,4 +5480,21 @@ function addCustomZone() {
 
 function removeCustomZone(zoneValue) {
     app.removeCustomZone(zoneValue);
+}
+
+// Export-related global functions
+function selectAllProjects() {
+    app.selectAllProjectsForExport();
+}
+
+function clearAllProjects() {
+    app.clearAllProjectsForExport();
+}
+
+function startExport() {
+    app.startExport();
+}
+
+function downloadExportFile() {
+    app.downloadExportFile();
 } 

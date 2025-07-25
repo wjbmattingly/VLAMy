@@ -966,17 +966,22 @@ class DownloadExportView(APIView):
                     status=status.HTTP_404_NOT_FOUND
                 )
             
-            # Determine content type
+            # Determine content type and file extension
             content_type = 'application/octet-stream'
+            file_extension = export_job.export_format
+            
             if export_job.export_format == 'json':
                 content_type = 'application/json'
+                file_extension = 'json'
             elif export_job.export_format == 'pagexml':
-                content_type = 'application/xml'
-            elif export_job.export_format == 'zip':
                 content_type = 'application/zip'
+                file_extension = 'zip'
+            elif export_job.export_format == 'vlamy':
+                content_type = 'application/zip'
+                file_extension = 'zip'
             
             # Generate filename
-            filename = f"{export_job.export_type}_{export_job.id}.{export_job.export_format}"
+            filename = f"{export_job.export_type}_{export_job.id}.{file_extension}"
             
             with open(export_job.file_path, 'rb') as f:
                 response = HttpResponse(f.read(), content_type=content_type)
@@ -985,6 +990,104 @@ class DownloadExportView(APIView):
                 
         except ExportJob.DoesNotExist:
             return Response({'error': 'Export job not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+class BulkExportView(APIView):
+    """Export multiple projects in VLAMy format"""
+    permission_classes = [IsAuthenticated, IsApprovedUser]
+    
+    def post(self, request):
+        project_ids = request.data.get('project_ids', [])
+        export_format = request.data.get('format', 'vlamy')  # Default to vlamy format
+        
+        if not project_ids:
+            return Response({'error': 'No project IDs provided'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        if export_format not in ['vlamy', 'json', 'pagexml']:
+            return Response({'error': 'Invalid export format. Use: vlamy, json, or pagexml'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate that user has access to all requested projects
+        user = request.user
+        projects = Project.objects.filter(
+            id__in=project_ids
+        ).filter(
+            Q(owner=user) | Q(shared_with=user)
+        ).distinct()
+        
+        if projects.count() != len(project_ids):
+            return Response(
+                {'error': 'You do not have access to all requested projects'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        # Create export job
+        export_job = ExportJob.objects.create(
+            export_type='project',
+            export_format=export_format,
+            status='processing',
+            requested_by=user
+        )
+        
+        # Process export
+        export_service = ExportService()
+        try:
+            if export_format == 'vlamy':
+                file_path = export_service.export_projects_vlamy(projects, export_job.id)
+            else:
+                file_path = export_service.export_projects_bulk(projects, export_format, export_job.id)
+            
+            export_job.status = 'completed'
+            export_job.file_path = file_path
+            export_job.file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+            export_job.completed_at = timezone.now()
+            export_job.save()
+            
+        except Exception as e:
+            export_job.status = 'failed'
+            export_job.error_message = str(e)
+            export_job.save()
+            return Response(
+                {'error': f'Export failed: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+        return Response(ExportJobSerializer(export_job).data)
+
+
+class ProjectListForExportView(APIView):
+    """Get a simple list of projects for export selection"""
+    permission_classes = [IsAuthenticated, IsApprovedUser]
+    
+    def get(self, request):
+        user = request.user
+        projects = Project.objects.filter(
+            Q(owner=user) | Q(shared_with=user)
+        ).distinct().select_related('owner').prefetch_related('documents__images')
+        
+        # Create simplified project data for export selection
+        project_data = []
+        for project in projects:
+            # Count total images across all documents
+            total_images = 0
+            for document in project.documents.all():
+                total_images += document.images.count()
+            
+            project_data.append({
+                'id': str(project.id),
+                'name': project.name,
+                'description': project.description,
+                'owner': project.owner.username,
+                'is_owner': project.owner == user,
+                'document_count': project.documents.count(),
+                'total_images': total_images,
+                'created_at': project.created_at.isoformat(),
+                'updated_at': project.updated_at.isoformat(),
+            })
+        
+        return Response({
+            'projects': project_data,
+            'count': len(project_data)
+        })
 
 
 class HealthCheckView(APIView):
