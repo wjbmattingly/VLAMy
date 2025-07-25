@@ -1428,6 +1428,10 @@ async ensureMainZonePrompt() {
                                 <h6>Untranscribed Zones Only</h6>
                                 <p>Only transcribe zones/lines without existing transcriptions</p>
                             </div>
+                            <div class="level-action-menu-item" onclick="app.showTranscriptionZoneSelectionModal('project', '${project.id}')">
+                                <h6>Selected Zones Only</h6>
+                                <p>Choose specific zone types to transcribe</p>
+                            </div>
                         </div>
                     </div>
                     <button class="btn btn-sm btn-outline-primary" onclick="event.stopPropagation(); app.showCreateDocumentModal('${project.id}')" title="Add Document">
@@ -1558,6 +1562,10 @@ async ensureMainZonePrompt() {
                             <div class="level-action-menu-item" onclick="app.transcribeDocument('${docItem.id}', 'untranscribed_zones')">
                                 <h6>Untranscribed Zones Only</h6>
                                 <p>Only transcribe zones/lines without existing transcriptions</p>
+                            </div>
+                            <div class="level-action-menu-item" onclick="app.showTranscriptionZoneSelectionModal('document', '${docItem.id}')">
+                                <h6>Selected Zones Only</h6>
+                                <p>Choose specific zone types to transcribe</p>
                             </div>
                         </div>
                     </div>
@@ -6091,6 +6099,7 @@ async ensureMainZonePrompt() {
          }
 
                  try {
+            this.operationCancelled = false;
             this.showProgressModal('Transcribing Project', `Starting transcription for project (${this.getTranscriptionModeLabel(mode)})...`);
 
              // Get all documents in the project
@@ -6106,12 +6115,20 @@ async ensureMainZonePrompt() {
 
              // Process each document
              for (const doc of documents.results) {
+                 if (this.operationCancelled) break;
+                 
                  const result = await this.transcribeDocumentImages(doc.id, mode, credentials);
                  totalProcessed += result.processed;
                  successCount += result.success;
              }
 
-                         this.completeProgressModal('success', `Project transcription completed! Processed ${totalProcessed} items, ${successCount} successful.`);
+             if (this.operationCancelled) {
+                 this.completeProgressModal('warning', 'Operation cancelled by user');
+             } else {
+                 this.completeProgressModal('success', `Project transcription completed! Processed ${totalProcessed} items, ${successCount} successful.`);
+                 // Refresh project tree to show updated status
+                 await this.loadProjects();
+             }
 
         } catch (error) {
             console.error('Project transcription error:', error);
@@ -6137,11 +6154,24 @@ async ensureMainZonePrompt() {
          }
 
                  try {
+            this.operationCancelled = false;
             this.showProgressModal('Transcribing Document', `Starting transcription for document (${this.getTranscriptionModeLabel(mode)})...`);
 
             const result = await this.transcribeDocumentImages(documentId, mode, credentials);
             
-            this.completeProgressModal('success', `Document transcription completed! Processed ${result.processed} items, ${result.success} successful.`);
+            if (this.operationCancelled) {
+                this.completeProgressModal('warning', 'Operation cancelled by user');
+            } else {
+                this.completeProgressModal('success', `Document transcription completed! Processed ${result.processed} items, ${result.success} successful.`);
+                // Refresh project tree to show updated status
+                await this.loadProjects();
+                
+                // If current image was in this document, refresh transcriptions
+                if (this.currentImage && this.currentImage.document === documentId) {
+                    await this.loadImageTranscriptions();
+                    this.updateCombinedTranscription();
+                }
+            }
 
         } catch (error) {
             console.error('Document transcription error:', error);
@@ -6160,18 +6190,40 @@ async ensureMainZonePrompt() {
 
          let processedCount = 0;
          let successCount = 0;
+         const totalImages = images.results.length;
+
+         // Initialize progress
+         this.updateProgress(0, totalImages, 'Initializing', `Found ${totalImages} images to process`);
 
          for (const image of images.results) {
+             if (this.operationCancelled) break;
+
              try {
-                 if (mode === 'full_image') {
+                 this.updateProgress(processedCount, totalImages, 'Processing', `Processing ${image.name}`);
+
+                 if (mode === 'full_image' || mode === 'untranscribed_images') {
                      // Check if we should skip already transcribed images
                      if (mode === 'untranscribed_images') {
-                         // Check if image already has full image transcription
-                         // This would require an API call to check transcription status
+                         const transcriptionsResponse = await fetch(`${this.apiBaseUrl}/transcriptions/?image=${image.id}&transcription_type=full_image`, {
+                             headers: { 'Authorization': `Token ${this.authToken}` }
+                         });
+                         if (transcriptionsResponse.ok) {
+                             const transcriptions = await transcriptionsResponse.json();
+                             if (transcriptions.results && transcriptions.results.length > 0) {
+                                 this.addProgressItem(image.name, 'skipped', 'Already has transcription');
+                                 processedCount++;
+                                 continue;
+                             }
+                         }
                      }
                      
                      const result = await this.transcribeImageById(image.id, credentials, 'full_image');
-                     if (result.success) successCount++;
+                     if (result.success) {
+                         successCount++;
+                         this.addProgressItem(image.name, 'success', 'Transcribed successfully');
+                     } else {
+                         this.addProgressItem(image.name, 'error', 'Transcription failed');
+                     }
                      processedCount++;
                      
                  } else if (mode === 'zones_only' || mode === 'untranscribed_zones') {
@@ -6184,9 +6236,13 @@ async ensureMainZonePrompt() {
                          const annotations = await annotationsResponse.json();
                          
                          if (annotations.results.length === 0 && mode === 'zones_only') {
-                             this.showAlert(`Image ${image.name} has no zones. Run zone detection first.`, 'warning');
+                             this.addProgressItem(image.name, 'warning', 'No zones found - run detection first');
+                             processedCount++;
                              continue;
                          }
+
+                         let imageSuccessCount = 0;
+                         let imageProcessedCount = 0;
 
                          for (const annotation of annotations.results) {
                              // Skip if only processing untranscribed and this one is already transcribed
@@ -6196,16 +6252,32 @@ async ensureMainZonePrompt() {
                              }
 
                              const result = await this.transcribeAnnotationById(annotation.id, credentials);
-                             if (result.success) successCount++;
+                             if (result.success) {
+                                 imageSuccessCount++;
+                                 successCount++;
+                             }
+                             imageProcessedCount++;
                              processedCount++;
                          }
+
+                         if (imageProcessedCount > 0) {
+                             this.addProgressItem(image.name, 'success', `Transcribed ${imageSuccessCount}/${imageProcessedCount} zones`);
+                         } else {
+                             this.addProgressItem(image.name, 'skipped', 'No zones to transcribe');
+                         }
+                     } else {
+                         this.addProgressItem(image.name, 'error', 'Failed to load annotations');
+                         processedCount++;
                      }
                  }
                  
              } catch (error) {
                  console.error(`Failed to process image ${image.id}:`, error);
+                 this.addProgressItem(image.name, 'error', error.message);
                  processedCount++;
              }
+
+             this.updateProgress(processedCount, totalImages, 'Processing', `${successCount} items transcribed so far`);
          }
 
          return { processed: processedCount, success: successCount };
@@ -6336,11 +6408,175 @@ async ensureMainZonePrompt() {
         });
     }
 
+    async executeProjectTranscription(projectId, mode, credentials, selectedTypes = []) {
+        this.operationCancelled = false;
+        this.showProgressModal('Transcribing Project', 'Starting transcription for project (selected zones only)...');
+
+        try {
+            // Get all documents in the project
+            const docsResponse = await fetch(`${this.apiBaseUrl}/documents/?project=${projectId}`, {
+                headers: { 'Authorization': `Token ${this.authToken}` }
+            });
+            
+            if (!docsResponse.ok) throw new Error('Failed to load project documents');
+            const documents = await docsResponse.json();
+
+            let totalProcessed = 0;
+            let successCount = 0;
+
+            // Process each document
+            for (const doc of documents.results) {
+                if (this.operationCancelled) break;
+                
+                const result = await this.transcribeDocumentImagesWithFilter(doc.id, credentials, selectedTypes);
+                totalProcessed += result.processed;
+                successCount += result.success;
+            }
+
+            if (this.operationCancelled) {
+                this.completeProgressModal('warning', 'Operation cancelled by user');
+            } else {
+                this.completeProgressModal('success', `Project transcription completed! Processed ${totalProcessed} items, ${successCount} successful.`);
+                await this.loadProjects();
+            }
+
+        } catch (error) {
+            console.error('Project transcription error:', error);
+            this.completeProgressModal('error', `Project transcription failed: ${error.message}`);
+        }
+    }
+
+    async executeDocumentTranscription(documentId, mode, credentials, selectedTypes = []) {
+        this.operationCancelled = false;
+        this.showProgressModal('Transcribing Document', 'Starting transcription for document (selected zones only)...');
+
+        try {
+            const result = await this.transcribeDocumentImagesWithFilter(documentId, credentials, selectedTypes);
+            
+            if (this.operationCancelled) {
+                this.completeProgressModal('warning', 'Operation cancelled by user');
+            } else {
+                this.completeProgressModal('success', `Document transcription completed! Processed ${result.processed} items, ${result.success} successful.`);
+                await this.loadProjects();
+                
+                // If current image was in this document, refresh transcriptions
+                if (this.currentImage && this.currentImage.document === documentId) {
+                    await this.loadImageTranscriptions();
+                    this.updateCombinedTranscription();
+                }
+            }
+
+        } catch (error) {
+            console.error('Document transcription error:', error);
+            this.completeProgressModal('error', `Document transcription failed: ${error.message}`);
+        }
+    }
+
+    async transcribeDocumentImagesWithFilter(documentId, credentials, selectedTypes) {
+        // Get all images in the document
+        const imagesResponse = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}`, {
+            headers: { 'Authorization': `Token ${this.authToken}` }
+        });
+        
+        if (!imagesResponse.ok) throw new Error('Failed to load document images');
+        const images = await imagesResponse.json();
+
+        let processedCount = 0;
+        let successCount = 0;
+        const totalImages = images.results.length;
+
+        // Initialize progress
+        this.updateProgress(0, totalImages, 'Initializing', `Found ${totalImages} images to process`);
+
+        for (const image of images.results) {
+            if (this.operationCancelled) break;
+
+            try {
+                this.updateProgress(processedCount, totalImages, 'Processing', `Processing ${image.name}`);
+
+                // Get annotations for this image
+                const annotationsResponse = await fetch(`${this.apiBaseUrl}/annotations/?image=${image.id}`, {
+                    headers: { 'Authorization': `Token ${this.authToken}` }
+                });
+                
+                if (annotationsResponse.ok) {
+                    const annotations = await annotationsResponse.json();
+                    
+                    // Filter annotations to only include selected types
+                    const filteredAnnotations = annotations.results.filter(annotation => 
+                        selectedTypes.includes(annotation.classification)
+                    );
+
+                    if (filteredAnnotations.length === 0) {
+                        this.addProgressItem(image.name, 'skipped', 'No matching zones found');
+                        processedCount++;
+                        continue;
+                    }
+
+                    let imageSuccessCount = 0;
+                    let imageProcessedCount = 0;
+
+                    for (const annotation of filteredAnnotations) {
+                        const result = await this.transcribeAnnotationById(annotation.id, credentials);
+                        if (result.success) {
+                            imageSuccessCount++;
+                            successCount++;
+                        }
+                        imageProcessedCount++;
+                        processedCount++;
+                    }
+
+                    this.addProgressItem(image.name, 'success', `Transcribed ${imageSuccessCount}/${imageProcessedCount} selected zones`);
+                } else {
+                    this.addProgressItem(image.name, 'error', 'Failed to load annotations');
+                    processedCount++;
+                }
+                
+            } catch (error) {
+                console.error(`Failed to process image ${image.id}:`, error);
+                this.addProgressItem(image.name, 'error', error.message);
+                processedCount++;
+            }
+
+            this.updateProgress(processedCount, totalImages, 'Processing', `${successCount} items transcribed so far`);
+        }
+
+        return { processed: processedCount, success: successCount };
+    }
+
     // Zone Selection Modal Functions
     showZoneSelectionModal() {
         this.populateZoneSelectionModal();
         this.selectDetectionMode('auto'); // Default to auto mode
         const modal = new bootstrap.Modal(document.getElementById('zoneSelectionModal'));
+        modal.show();
+    }
+
+    showTranscriptionZoneSelectionModal(type, id) {
+        this.hideLevelActionMenus();
+        
+        // Check credentials first
+        const credentials = this.getStoredCredentials();
+        if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+            this.showAlert('Please configure your API credentials first', 'warning');
+            this.showCredentialsModal();
+            return;
+        }
+
+        // Store context for zone selection modal
+        this.currentTranscriptionContext = {
+            type: type,
+            id: id,
+            credentials: credentials
+        };
+
+        // Set modal title
+        document.getElementById('transcriptionZoneSelectionTitle').textContent = 
+            `Select Zone Types for ${type === 'project' ? 'Project' : 'Document'} Transcription`;
+        
+        this.populateTranscriptionZoneSelectionModal();
+        
+        const modal = new bootstrap.Modal(document.getElementById('transcriptionZoneSelectionModal'));
         modal.show();
     }
 
@@ -6462,6 +6698,100 @@ async ensureMainZonePrompt() {
             await this.executeProjectDetection(context.id, context.mode, context.credentials, selectedZones, selectedLines, useFiltering);
         } else if (context.type === 'document') {
             await this.executeDocumentDetection(context.id, context.mode, context.credentials, selectedZones, selectedLines, useFiltering);
+        }
+    }
+
+    populateTranscriptionZoneSelectionModal() {
+        if (!this.annotationTypes || !this.userEnabledTypes) return;
+
+        const zoneContainer = document.getElementById('transcriptionZoneSelectionZoneTypes');
+        const lineContainer = document.getElementById('transcriptionZoneSelectionLineTypes');
+
+        // Clear existing options
+        zoneContainer.innerHTML = '';
+        lineContainer.innerHTML = '';
+
+        // Add zone type checkboxes (including custom zones)
+        [...this.annotationTypes.all_types.zones, ...this.customZones].forEach(zoneType => {
+            if (this.userEnabledTypes.zones.includes(zoneType.value)) {
+                const checkbox = this.createTranscriptionZoneSelectionCheckbox(zoneType, 'zone');
+                zoneContainer.appendChild(checkbox);
+            }
+        });
+
+        // Add line type checkboxes
+        this.annotationTypes.all_types.lines.forEach(lineType => {
+            if (this.userEnabledTypes.lines.includes(lineType.value)) {
+                const checkbox = this.createTranscriptionZoneSelectionCheckbox(lineType, 'line');
+                lineContainer.appendChild(checkbox);
+            }
+        });
+    }
+
+    createTranscriptionZoneSelectionCheckbox(typeInfo, category) {
+        const div = document.createElement('div');
+        div.className = 'form-check';
+
+        const checkbox = document.createElement('input');
+        checkbox.className = 'form-check-input';
+        checkbox.type = 'checkbox';
+        checkbox.id = `transcription_zone_select_${category}_${typeInfo.value}`;
+        checkbox.value = typeInfo.value;
+
+        const label = document.createElement('label');
+        label.className = 'form-check-label';
+        label.setAttribute('for', checkbox.id);
+        label.textContent = typeInfo.label;
+
+        div.appendChild(checkbox);
+        div.appendChild(label);
+
+        return div;
+    }
+
+    toggleAllTranscriptionZoneTypes(selectAll) {
+        document.querySelectorAll('#transcriptionZoneSelectionZoneTypes input[type="checkbox"]').forEach(checkbox => {
+            checkbox.checked = selectAll;
+        });
+    }
+
+    toggleAllTranscriptionLineTypes(selectAll) {
+        document.querySelectorAll('#transcriptionZoneSelectionLineTypes input[type="checkbox"]').forEach(checkbox => {
+            checkbox.checked = selectAll;
+        });
+    }
+
+    async startSelectedZoneTranscription() {
+        let selectedZones = [];
+        let selectedLines = [];
+
+        // Get selected zone types
+        document.querySelectorAll('#transcriptionZoneSelectionZoneTypes input[type="checkbox"]:checked').forEach(checkbox => {
+            selectedZones.push(checkbox.value);
+        });
+
+        // Get selected line types
+        document.querySelectorAll('#transcriptionZoneSelectionLineTypes input[type="checkbox"]:checked').forEach(checkbox => {
+            selectedLines.push(checkbox.value);
+        });
+
+        if (selectedZones.length === 0 && selectedLines.length === 0) {
+            this.showAlert('Please select at least one zone or line type', 'warning');
+            return;
+        }
+
+        // Hide the zone selection modal
+        const modal = bootstrap.Modal.getInstance(document.getElementById('transcriptionZoneSelectionModal'));
+        if (modal) modal.hide();
+
+        // Execute transcription with selected types
+        const context = this.currentTranscriptionContext;
+        const selectedTypes = [...selectedZones, ...selectedLines];
+        
+        if (context.type === 'project') {
+            await this.executeProjectTranscription(context.id, 'selected_zones', context.credentials, selectedTypes);
+        } else if (context.type === 'document') {
+            await this.executeDocumentTranscription(context.id, 'selected_zones', context.credentials, selectedTypes);
         }
     }
 
@@ -7014,4 +7344,17 @@ function startExport() {
 
 function downloadExportFile() {
     app.downloadExportFile();
-} 
+}
+
+// Transcription zone selection global functions
+function toggleAllTranscriptionZoneTypes(selectAll) {
+    app.toggleAllTranscriptionZoneTypes(selectAll);
+}
+
+function toggleAllTranscriptionLineTypes(selectAll) {
+    app.toggleAllTranscriptionLineTypes(selectAll);
+}
+
+function startSelectedZoneTranscription() {
+    app.startSelectedZoneTranscription();
+}

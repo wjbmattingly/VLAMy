@@ -1018,6 +1018,56 @@
         </div>
     </div>
 
+    <!-- Transcription Zone Selection Modal -->
+    <div class="modal fade" id="transcriptionZoneSelectionModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="transcriptionZoneSelectionTitle">
+                        <i class="fas fa-robot me-2"></i>Select Zone Types to Transcribe
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-info">
+                        <i class="fas fa-info-circle me-2"></i>
+                        Choose which zone types to transcribe. Only annotations of the selected types will be processed.
+                    </div>
+                    
+                    <!-- Zone Type Selection -->
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h6 class="text-primary mb-3">
+                                <i class="fas fa-square me-2"></i>Zone Types
+                                <button class="btn btn-xs btn-outline-primary ms-2" onclick="toggleAllTranscriptionZoneTypes(true)">All</button>
+                                <button class="btn btn-xs btn-outline-secondary ms-1" onclick="toggleAllTranscriptionZoneTypes(false)">None</button>
+                            </h6>
+                            <div id="transcriptionZoneSelectionZoneTypes" class="zone-selection-list">
+                                <!-- Zone type checkboxes will be populated by JavaScript -->
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <h6 class="text-success mb-3">
+                                <i class="fas fa-minus me-2"></i>Line Types
+                                <button class="btn btn-xs btn-outline-success ms-2" onclick="toggleAllTranscriptionLineTypes(true)">All</button>
+                                <button class="btn btn-xs btn-outline-secondary ms-1" onclick="toggleAllTranscriptionLineTypes(false)">None</button>
+                            </h6>
+                            <div id="transcriptionZoneSelectionLineTypes" class="zone-selection-list">
+                                <!-- Line type checkboxes will be populated by JavaScript -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-success" onclick="startSelectedZoneTranscription()">
+                        <i class="fas fa-robot me-2"></i>Start Transcription
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Export Projects Modal -->
     <div class="modal fade" id="exportProjectsModal" tabindex="-1">
         <div class="modal-dialog modal-lg">
