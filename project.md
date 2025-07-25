@@ -1,0 +1,9 @@
+Build a Django application. The purpose of this application is to let someone use the OpenAI API or a Custom Endpoint. Let them paste in their credentials. Cachce this user side and make that clear to the user. I want the project to have three levels inside each user's account. I want there to be a project. I want a project to have a document. I want a document to be a collection of images. Each image should have the ability to draw and edit bounding boxes or polygons. I want the user to be able to send either the full image or the regions off for transcription to the endpoint. I want the image to be displayed on the left and the output displayed on the right in a way where a user can clearly see how the text maps to the data on the page. I want you to let the user set a default for a document. By default the reading order should be top-to-bottom and left-to-right. Let the user change the reading order.
+
+
+Requirements:
+1. The creation of an account should be presented as form to request the admin account who can approve or disapprove their request.
+2. Each user only has access to their own project and images. They can grant or revoke access to another user should they wish access.
+3. Maintain a version history for each image's transcription and edits so they can be reverted.
+4. By default the database should be a local database that makes sense. In the future, I'd like to be able to also support. I would also like an option at launch to just have a simple version of the app that cachces the project and images for a user in the browser. This way I can just put it on GitHub and let someone connect their own endpoints without ever handling the database.
+5. Export the data as JSON and PageXML and images as a Zip. Export should be available at the image level, document level, and project level.

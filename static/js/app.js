@@ -1,0 +1,5241 @@
+// VLAMy OCR Application JavaScript
+
+class OCRApp {
+    constructor() {
+        this.apiBaseUrl = '/api';
+        this.authToken = localStorage.getItem('authToken');
+        this.currentUser = null;
+        this.currentProject = null;
+        this.currentDocument = null;
+        this.currentImage = null;
+        this.canvas = null;
+        this.currentTool = 'select';
+        this.isDrawing = false;
+        this.annotations = [];
+        this.selectedAnnotations = [];
+        
+        // Panel state tracking
+        this.leftPanelWidth = null;
+        this.rightPanelWidth = null;
+        this.resizeTimeout = null;
+        
+        // Annotation classification
+        this.annotationTypes = null;
+        this.userEnabledTypes = null;
+        this.currentClassification = '';
+        this.customZones = [];
+        this.zoneColors = {};
+        
+        // Default color palette for zones
+        this.defaultColors = [
+            '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57',
+            '#FF9FF3', '#54A0FF', '#5F27CD', '#00D2D3', '#FF9F43',
+            '#686DE0', '#4834D4', '#130F40', '#30336B', '#6C5CE7',
+            '#A29BFE', '#FD79A8', '#FDCB6E', '#E17055', '#81ECEC'
+        ];
+        
+        // Prompts and editing
+        this.customPrompts = [];
+        this.currentEditingAnnotation = null;
+        this.selectedPrompt = null;
+        
+        // Edit state tracking
+        this.currentlyEditingId = null;
+        this.hasUnsavedChanges = false;
+        this.originalFormData = null;
+        
+        // Bulk selection
+        this.bulkSelectMode = false;
+        this.selectedItems = new Set();
+        this.pendingDeleteItems = null;
+        
+        this.init();
+    }
+
+    async init() {
+        this.setupEventListeners();
+        
+        if (this.authToken) {
+            try {
+                await this.loadUserProfile();
+                await this.loadAnnotationTypes();
+                this.showAppInterface();
+                await this.loadProjects();
+            } catch (error) {
+                console.error('Failed to load user profile:', error);
+                this.logout();
+            }
+        } else {
+            this.showWelcomeScreen();
+        }
+    }
+
+    setupEventListeners() {
+        // Form submissions
+        document.getElementById('loginForm').addEventListener('submit', (e) => this.login(e));
+        document.getElementById('registerForm').addEventListener('submit', (e) => this.register(e));
+        
+        // Navigation
+        document.addEventListener('keydown', (e) => this.handleKeyboard(e));
+        
+        // Window resize
+        window.addEventListener('resize', () => this.resizeCanvas());
+    }
+
+    // Authentication Methods
+    async login(event) {
+        event.preventDefault();
+        const username = document.getElementById('loginUsername').value;
+        const password = document.getElementById('loginPassword').value;
+
+        try {
+            this.showLoading(true);
+            const response = await fetch(`${this.apiBaseUrl}/auth/login/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ username, password })
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                this.authToken = data.token;
+                localStorage.setItem('authToken', this.authToken);
+                
+                await this.loadUserProfile();
+                this.showAppInterface();
+                await this.loadProjects();
+                this.showAlert('Login successful!', 'success');
+            } else {
+                const error = await response.json();
+                this.showAlert(error.detail || 'Login failed', 'danger');
+            }
+        } catch (error) {
+            console.error('Login error:', error);
+            this.showAlert('Login failed. Please try again.', 'danger');
+        } finally {
+            this.showLoading(false);
+        }
+    }
+
+    async register(event) {
+        event.preventDefault();
+        const formData = {
+            first_name: document.getElementById('regFirstName').value,
+            last_name: document.getElementById('regLastName').value,
+            username: document.getElementById('regUsername').value,
+            email: document.getElementById('regEmail').value,
+            password: document.getElementById('regPassword').value,
+            password_confirm: document.getElementById('regPasswordConfirm').value
+        };
+
+        if (formData.password !== formData.password_confirm) {
+            this.showAlert('Passwords do not match', 'danger');
+            return;
+        }
+
+        try {
+            this.showLoading(true);
+            const response = await fetch(`${this.apiBaseUrl}/auth/register/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(formData)
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                this.showAlert(data.message, 'success');
+                this.showLogin();
+            } else {
+                const error = await response.json();
+                this.showAlert(Object.values(error).flat().join(' '), 'danger');
+            }
+        } catch (error) {
+            console.error('Registration error:', error);
+            this.showAlert('Registration failed. Please try again.', 'danger');
+        } finally {
+            this.showLoading(false);
+        }
+    }
+
+    async loadUserProfile() {
+        const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+            headers: {
+                'Authorization': `Token ${this.authToken}`
+            }
+        });
+
+        if (response.ok) {
+            this.currentUser = await response.json();
+            document.getElementById('username').textContent = this.currentUser.user.username;
+            this.customPrompts = this.currentUser.custom_prompts || [];
+            this.customZones = this.currentUser.custom_zones || [];
+            this.zoneColors = this.currentUser.zone_colors || {};
+            this.initializeDefaultColors();
+            this.updateCredentialsStatus();
+            this.populatePromptsList();
+        } else {
+            throw new Error('Failed to load user profile');
+        }
+    }
+
+    async loadAnnotationTypes() {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/annotation-types/`, {
+                headers: {
+                    'Authorization': `Token ${this.authToken}`
+                }
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                this.annotationTypes = data;
+                this.userEnabledTypes = data.user_enabled;
+                this.initializeDefaultColors();
+                this.populateClassificationSelector();
+                this.populateAnnotationTypesChecklist();
+            } else {
+                console.error('Failed to load annotation types');
+            }
+        } catch (error) {
+            console.error('Error loading annotation types:', error);
+        }
+    }
+
+    logout() {
+        this.authToken = null;
+        this.currentUser = null;
+        localStorage.removeItem('authToken');
+        this.showWelcomeScreen();
+    }
+
+    // UI State Management
+    showWelcomeScreen() {
+        document.getElementById('welcomeScreen').style.display = 'block';
+        document.getElementById('loginScreen').style.display = 'none';
+        document.getElementById('registerScreen').style.display = 'none';
+        document.getElementById('appInterface').style.display = 'none';
+        document.getElementById('userMenu').style.display = 'none';
+        document.getElementById('loginButton').style.display = 'block';
+    }
+
+    showLogin() {
+        document.getElementById('welcomeScreen').style.display = 'none';
+        document.getElementById('loginScreen').style.display = 'block';
+        document.getElementById('registerScreen').style.display = 'none';
+        document.getElementById('appInterface').style.display = 'none';
+    }
+
+    showRegister() {
+        document.getElementById('welcomeScreen').style.display = 'none';
+        document.getElementById('loginScreen').style.display = 'none';
+        document.getElementById('registerScreen').style.display = 'block';
+        document.getElementById('appInterface').style.display = 'none';
+    }
+
+    showAppInterface() {
+        document.getElementById('welcomeScreen').style.display = 'none';
+        document.getElementById('loginScreen').style.display = 'none';
+        document.getElementById('registerScreen').style.display = 'none';
+        document.getElementById('appInterface').style.display = 'block';
+        document.getElementById('userMenu').style.display = 'block';
+        document.getElementById('loginButton').style.display = 'none';
+        
+        if (!this.canvas) {
+            this.initCanvas();
+        }
+        
+        // Initialize panel resize functionality
+        this.initPanelResize();
+    }
+
+    showLoading(show) {
+        document.getElementById('loadingSpinner').style.display = show ? 'flex' : 'none';
+    }
+
+    showAlert(message, type = 'info') {
+        const alertContainer = document.getElementById('alertContainer');
+        const alertId = 'alert_' + Date.now();
+        
+        const alertHtml = `
+            <div id="${alertId}" class="alert alert-${type} alert-dismissible fade show" role="alert">
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
+        `;
+        
+        alertContainer.insertAdjacentHTML('beforeend', alertHtml);
+        
+        // Auto-remove after 5 seconds
+        setTimeout(() => {
+            const alert = document.getElementById(alertId);
+            if (alert) {
+                alert.remove();
+            }
+        }, 5000);
+    }
+
+    // Canvas and Annotation Methods
+    initCanvas() {
+        this.canvas = new fabric.Canvas('fabricCanvas', {
+            width: 1200,
+            height: 800,
+            backgroundColor: 'white',
+            uniformScaling: false,
+            uniScaleTransform: false
+        });
+
+        this.canvas.on('mouse:down', (event) => this.onMouseDown(event));
+        this.canvas.on('mouse:move', (event) => this.onMouseMove(event));
+        this.canvas.on('mouse:up', (event) => this.onMouseUp(event));
+        this.canvas.on('selection:created', (event) => this.onSelectionCreated(event));
+        this.canvas.on('selection:updated', (event) => this.onSelectionUpdated(event));
+        this.canvas.on('selection:cleared', () => this.onSelectionCleared());
+        this.canvas.on('object:modified', (event) => this.onObjectModified(event));
+        
+        // Force disable uniform scaling on all objects when selected
+        this.canvas.on('selection:created', (event) => this.disableUniformScaling(event));
+        this.canvas.on('selection:updated', (event) => this.disableUniformScaling(event));
+
+        this.resizeCanvas();
+        
+        // Set global Fabric.js settings to disable uniform scaling
+        if (typeof fabric !== 'undefined') {
+            fabric.Object.prototype.uniformScaling = false;
+            fabric.Object.prototype.uniScaleTransform = false;
+            fabric.Object.prototype.lockUniScaling = false;
+        }
+    }
+
+    resizeCanvas() {
+        if (!this.canvas) return;
+        
+        const container = document.querySelector('.canvas-container');
+        const maxWidth = container.clientWidth - 40;
+        const maxHeight = container.clientHeight - 40;
+        
+        // Use much more of the available space
+        this.canvas.setDimensions({
+            width: Math.max(1200, maxWidth),
+            height: Math.max(800, maxHeight)
+        });
+        
+        // If we have a current image, recalculate its position and refresh annotations
+        if (this.currentFabricImage && this.currentImage) {
+            this.repositionImageAndAnnotations();
+        }
+    }
+
+    repositionImageAndAnnotations() {
+        if (!this.currentFabricImage || !this.imageTransform) return;
+        
+        const canvasWidth = this.canvas.getWidth();
+        const canvasHeight = this.canvas.getHeight();
+        const imgWidth = this.imageTransform.originalWidth;
+        const imgHeight = this.imageTransform.originalHeight;
+        
+        // Recalculate scale and position
+        const scaleX = canvasWidth / imgWidth;
+        const scaleY = canvasHeight / imgHeight;
+        let scale = Math.min(scaleX, scaleY, 1);
+        
+        // For small images, allow some scaling up (up to 2x)
+        if (scale === 1 && imgWidth < 400 && imgHeight < 400) {
+            scale = Math.min(2, Math.min(canvasWidth / imgWidth, canvasHeight / imgHeight));
+        }
+        
+        // Update image position and scale
+        const scaledWidth = imgWidth * scale;
+        const scaledHeight = imgHeight * scale;
+        const left = (canvasWidth - scaledWidth) / 2;
+        const top = (canvasHeight - scaledHeight) / 2;
+        
+        this.currentFabricImage.set({
+            scaleX: scale,
+            scaleY: scale,
+            left: left,
+            top: top
+        });
+        
+        // Update image transform
+        this.imageTransform = {
+            scale: scale,
+            left: left,
+            top: top,
+            originalWidth: imgWidth,
+            originalHeight: imgHeight
+        };
+        
+        // Refresh annotation positions
+        this.refreshAnnotationPositions();
+    }
+
+    // Throttled version for smooth performance during resize
+    throttledResizeCanvas() {
+        if (this.resizeTimeout) {
+            clearTimeout(this.resizeTimeout);
+        }
+        this.resizeTimeout = setTimeout(() => {
+            this.resizeCanvas();
+        }, 16); // ~60fps
+    }
+
+    setTool(tool) {
+        this.currentTool = tool;
+        
+        // Update tool buttons
+        document.querySelectorAll('.toolbar .btn').forEach(btn => {
+            btn.classList.remove('active');
+        });
+        document.getElementById(tool + 'Tool').classList.add('active');
+        
+        // Show/hide classification selector
+        const classificationSelector = document.getElementById('classificationSelector');
+        if (tool === 'bbox' && this.annotationTypes) {
+            classificationSelector.style.display = 'flex';
+        } else {
+            classificationSelector.style.display = 'none';
+        }
+        
+        // Update canvas selection mode
+        if (tool === 'select') {
+            this.canvas.selection = true;
+            this.canvas.defaultCursor = 'default';
+        } else {
+            this.canvas.selection = false;
+            this.canvas.defaultCursor = 'crosshair';
+        }
+    }
+
+    populateClassificationSelector() {
+        if (!this.annotationTypes || !this.userEnabledTypes) return;
+        
+        const selector = document.getElementById('annotationClassification');
+        if (!selector) return;
+        
+        // Clear existing options except the first one
+        while (selector.children.length > 1) {
+            selector.removeChild(selector.lastChild);
+        }
+        
+        // Add zone types (including custom zones)
+        if (this.userEnabledTypes.zones && this.userEnabledTypes.zones.length > 0) {
+            const zoneGroup = document.createElement('optgroup');
+            zoneGroup.label = 'Zone Types';
+            
+            this.userEnabledTypes.zones.forEach(zoneCode => {
+                // First check built-in zones
+                let zoneType = this.annotationTypes.all_types.zones.find(z => z.value === zoneCode);
+                
+                // Then check custom zones
+                if (!zoneType) {
+                    zoneType = this.customZones.find(z => z.value === zoneCode);
+                }
+                
+                if (zoneType) {
+                    const option = document.createElement('option');
+                    option.value = zoneType.value;
+                    option.textContent = zoneType.label;
+                    zoneGroup.appendChild(option);
+                }
+            });
+            
+            if (zoneGroup.children.length > 0) {
+                selector.appendChild(zoneGroup);
+            }
+        }
+        
+        // Add line types
+        if (this.userEnabledTypes.lines && this.userEnabledTypes.lines.length > 0) {
+            const lineGroup = document.createElement('optgroup');
+            lineGroup.label = 'Line Types';
+            
+            this.userEnabledTypes.lines.forEach(lineCode => {
+                const lineType = this.annotationTypes.all_types.lines.find(l => l.value === lineCode);
+                if (lineType) {
+                    const option = document.createElement('option');
+                    option.value = lineType.value;
+                    option.textContent = lineType.label;
+                    lineGroup.appendChild(option);
+                }
+            });
+            
+            if (lineGroup.children.length > 0) {
+                selector.appendChild(lineGroup);
+            }
+        }
+        
+        // Listen for changes
+        selector.addEventListener('change', (e) => {
+            this.currentClassification = e.target.value;
+        });
+    }
+
+    initializeDefaultColors() {
+        // Initialize colors for built-in zones if not already set
+        if (this.annotationTypes) {
+            let colorIndex = 0;
+            
+            // Assign colors to built-in zone types
+            this.annotationTypes.all_types.zones.forEach(zoneType => {
+                if (!this.zoneColors[zoneType.value]) {
+                    this.zoneColors[zoneType.value] = this.defaultColors[colorIndex % this.defaultColors.length];
+                    colorIndex++;
+                }
+            });
+            
+            // Assign colors to built-in line types
+            this.annotationTypes.all_types.lines.forEach(lineType => {
+                if (!this.zoneColors[lineType.value]) {
+                    this.zoneColors[lineType.value] = this.defaultColors[colorIndex % this.defaultColors.length];
+                    colorIndex++;
+                }
+            });
+        }
+        
+        // Assign colors to custom zones
+        this.customZones.forEach(customZone => {
+            if (!this.zoneColors[customZone.value]) {
+                const usedColors = Object.values(this.zoneColors);
+                const availableColors = this.defaultColors.filter(color => !usedColors.includes(color));
+                this.zoneColors[customZone.value] = availableColors.length > 0 ? 
+                    availableColors[0] : this.defaultColors[Object.keys(this.zoneColors).length % this.defaultColors.length];
+            }
+        });
+    }
+
+    populateAnnotationTypesChecklist() {
+        if (!this.annotationTypes || !this.userEnabledTypes) return;
+
+        const checklist = document.getElementById('annotationTypesChecklist');
+        if (!checklist) return;
+
+        checklist.innerHTML = '';
+
+        // Add Zone Types section
+        checklist.insertAdjacentHTML('beforeend', '<div class="config-group-header">Zone Types</div>');
+        
+        this.annotationTypes.all_types.zones.forEach(zoneType => {
+            const isEnabled = this.userEnabledTypes.zones.includes(zoneType.value);
+            const color = this.zoneColors[zoneType.value] || '#0066cc';
+            const checkboxHtml = `
+                <div class="form-check zone-type-item" data-zone-type="${zoneType.value}">
+                    <input class="form-check-input" type="checkbox" value="${zoneType.value}" 
+                           id="type_${zoneType.value}" ${isEnabled ? 'checked' : ''}
+                           onchange="app.handleAnnotationTypeChange()">
+                    <label class="form-check-label" for="type_${zoneType.value}">
+                        ${zoneType.label}
+                    </label>
+                    <input type="color" class="form-control form-control-sm zone-color-picker" 
+                           value="${color}" title="Change color"
+                           onchange="app.updateZoneColor('${zoneType.value}', this.value)">
+                </div>
+            `;
+            checklist.insertAdjacentHTML('beforeend', checkboxHtml);
+        });
+
+        // Add Custom Zones section
+        checklist.insertAdjacentHTML('beforeend', `
+            <div class="config-group-header">
+                Custom Zones
+                <button class="btn btn-xs btn-outline-success ms-2" onclick="app.showAddCustomZoneModal()" title="Add Custom Zone">
+                    <i class="fas fa-plus"></i>
+                </button>
+            </div>
+        `);
+        
+        this.customZones.forEach(customZone => {
+            const isEnabled = this.userEnabledTypes.zones.includes(customZone.value);
+            const color = this.zoneColors[customZone.value] || '#0066cc';
+            const checkboxHtml = `
+                <div class="form-check zone-type-item custom-zone-item" data-zone-type="${customZone.value}">
+                    <input class="form-check-input" type="checkbox" value="${customZone.value}" 
+                           id="type_${customZone.value}" ${isEnabled ? 'checked' : ''}
+                           onchange="app.handleAnnotationTypeChange()">
+                    <label class="form-check-label" for="type_${customZone.value}">
+                        ${customZone.label}
+                    </label>
+                    <div class="custom-zone-controls">
+                        <input type="color" class="form-control form-control-sm zone-color-picker" 
+                               value="${color}" title="Change color"
+                               onchange="app.updateZoneColor('${customZone.value}', this.value)">
+                        <button class="btn btn-xs btn-outline-danger" onclick="app.removeCustomZone('${customZone.value}')" title="Remove">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
+                </div>
+            `;
+            checklist.insertAdjacentHTML('beforeend', checkboxHtml);
+        });
+
+        // Add Line Types section
+        checklist.insertAdjacentHTML('beforeend', '<div class="config-group-header">Line Types</div>');
+        
+        this.annotationTypes.all_types.lines.forEach(lineType => {
+            const isEnabled = this.userEnabledTypes.lines.includes(lineType.value);
+            const color = this.zoneColors[lineType.value] || '#0066cc';
+            const checkboxHtml = `
+                <div class="form-check zone-type-item" data-zone-type="${lineType.value}">
+                    <input class="form-check-input" type="checkbox" value="${lineType.value}" 
+                           id="type_${lineType.value}" ${isEnabled ? 'checked' : ''}
+                           onchange="app.handleAnnotationTypeChange()">
+                    <label class="form-check-label" for="type_${lineType.value}">
+                        ${lineType.label}
+                    </label>
+                    <input type="color" class="form-control form-control-sm zone-color-picker" 
+                           value="${color}" title="Change color"
+                           onchange="app.updateZoneColor('${lineType.value}', this.value)">
+                </div>
+            `;
+            checklist.insertAdjacentHTML('beforeend', checkboxHtml);
+        });
+    }
+
+    async handleAnnotationTypeChange() {
+        // Collect selected types from the checklist
+        const selectedZones = [];
+        const selectedLines = [];
+
+        // Get all checked zone types (including custom zones)
+        const allZoneTypes = [...this.annotationTypes.all_types.zones, ...this.customZones];
+        allZoneTypes.forEach(zoneType => {
+            const checkbox = document.getElementById(`type_${zoneType.value}`);
+            if (checkbox && checkbox.checked) {
+                selectedZones.push(zoneType.value);
+            }
+        });
+
+        // Get all checked line types
+        this.annotationTypes.all_types.lines.forEach(lineType => {
+            const checkbox = document.getElementById(`type_${lineType.value}`);
+            if (checkbox && checkbox.checked) {
+                selectedLines.push(lineType.value);
+            }
+        });
+
+        try {
+            // Save to backend
+            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({
+                    enabled_zone_types: selectedZones,
+                    enabled_line_types: selectedLines,
+                    custom_zones: this.customZones,
+                    zone_colors: this.zoneColors
+                })
+            });
+
+            if (response.ok) {
+                // Update local state
+                this.userEnabledTypes.zones = selectedZones;
+                this.userEnabledTypes.lines = selectedLines;
+                
+                // Refresh UI components
+                this.populateClassificationSelector();
+            }
+        } catch (error) {
+            console.error('Error saving annotation type change:', error);
+        }
+    }
+
+    async updateZoneColor(zoneValue, newColor) {
+        this.zoneColors[zoneValue] = newColor;
+        
+        // Update colors of existing annotations on canvas
+        this.updateCanvasAnnotationColors();
+        
+        // Update colors in right sidebar
+        this.updateCombinedTranscription();
+        
+        // Save to backend
+        try {
+            await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({
+                    zone_colors: this.zoneColors
+                })
+            });
+        } catch (error) {
+            console.error('Error saving zone color:', error);
+        }
+    }
+
+    updateCanvasAnnotationColors() {
+        if (!this.canvas || !this.annotations) return;
+        
+        this.annotations.forEach(annotation => {
+            if (annotation.fabricObject && annotation.classification) {
+                const color = this.zoneColors[annotation.classification] || '#0066cc';
+                const fillColor = this.hexToRgba(color, 0.1);
+                
+                annotation.fabricObject.set({
+                    stroke: color,
+                    fill: fillColor,
+                    cornerColor: color
+                });
+            }
+        });
+        
+        this.canvas.renderAll();
+    }
+
+    hexToRgba(hex, alpha) {
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+
+    showAddCustomZoneModal() {
+        // Create modal HTML if it doesn't exist
+        let modal = document.getElementById('addCustomZoneModal');
+        if (!modal) {
+            const modalHtml = `
+                <div class="modal fade" id="addCustomZoneModal" tabindex="-1">
+                    <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title">
+                                    <i class="fas fa-plus me-2"></i>Add Custom Zone
+                                </h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                            </div>
+                            <div class="modal-body">
+                                <form id="addCustomZoneForm">
+                                    <div class="mb-3">
+                                        <label for="customZoneName" class="form-label">Zone Name</label>
+                                        <input type="text" class="form-control" id="customZoneName" required>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="customZoneColor" class="form-label">Zone Color</label>
+                                        <input type="color" class="form-control form-control-color" id="customZoneColor" value="#FF6B6B">
+                                    </div>
+                                </form>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                                <button type="button" class="btn btn-success" onclick="app.addCustomZone()">
+                                    <i class="fas fa-plus me-1"></i>Add Zone
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+        }
+        
+        // Reset form and show modal
+        document.getElementById('addCustomZoneForm').reset();
+        
+        // Set a unique color
+        const usedColors = Object.values(this.zoneColors);
+        const availableColors = this.defaultColors.filter(color => !usedColors.includes(color));
+        const suggestedColor = availableColors.length > 0 ? availableColors[0] : this.defaultColors[0];
+        document.getElementById('customZoneColor').value = suggestedColor;
+        
+        const bsModal = new bootstrap.Modal(document.getElementById('addCustomZoneModal'));
+        bsModal.show();
+    }
+
+    async addCustomZone() {
+        const zoneName = document.getElementById('customZoneName').value.trim();
+        const zoneColor = document.getElementById('customZoneColor').value;
+        
+        if (!zoneName) {
+            this.showAlert('Please enter a zone name', 'warning');
+            return;
+        }
+        
+        // Create zone value from name (lowercase, replace spaces with underscores)
+        const zoneValue = 'custom_' + zoneName.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+        
+        // Check if zone already exists
+        const allZones = [...this.annotationTypes.all_types.zones, ...this.customZones];
+        if (allZones.some(zone => zone.value === zoneValue)) {
+            this.showAlert('A zone with this name already exists', 'warning');
+            return;
+        }
+        
+        // Add to custom zones
+        const newZone = {
+            value: zoneValue,
+            label: zoneName
+        };
+        
+        this.customZones.push(newZone);
+        this.zoneColors[zoneValue] = zoneColor;
+        
+        // Enable the new zone by default
+        this.userEnabledTypes.zones.push(zoneValue);
+        
+        try {
+            // Save to backend
+            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({
+                    custom_zones: this.customZones,
+                    zone_colors: this.zoneColors,
+                    enabled_zone_types: this.userEnabledTypes.zones,
+                    enabled_line_types: this.userEnabledTypes.lines
+                })
+            });
+
+            if (response.ok) {
+                // Refresh UI
+                this.populateAnnotationTypesChecklist();
+                this.populateClassificationSelector();
+                
+                // Hide modal
+                const modal = bootstrap.Modal.getInstance(document.getElementById('addCustomZoneModal'));
+                modal.hide();
+                
+                this.showAlert('Custom zone added successfully!', 'success');
+            } else {
+                throw new Error('Failed to save custom zone');
+            }
+        } catch (error) {
+            console.error('Error adding custom zone:', error);
+            this.showAlert('Failed to add custom zone', 'danger');
+        }
+    }
+
+    async removeCustomZone(zoneValue) {
+        if (!confirm('Are you sure you want to remove this custom zone? All annotations using this zone will lose their classification.')) {
+            return;
+        }
+        
+        // Remove from custom zones
+        this.customZones = this.customZones.filter(zone => zone.value !== zoneValue);
+        
+        // Remove from enabled zones
+        this.userEnabledTypes.zones = this.userEnabledTypes.zones.filter(z => z !== zoneValue);
+        
+        // Remove color
+        delete this.zoneColors[zoneValue];
+        
+        try {
+            // Save to backend
+            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({
+                    custom_zones: this.customZones,
+                    zone_colors: this.zoneColors,
+                    enabled_zone_types: this.userEnabledTypes.zones,
+                    enabled_line_types: this.userEnabledTypes.lines
+                })
+            });
+
+            if (response.ok) {
+                // Refresh UI
+                this.populateAnnotationTypesChecklist();
+                this.populateClassificationSelector();
+                this.updateCombinedTranscription();
+                
+                this.showAlert('Custom zone removed successfully!', 'success');
+            } else {
+                throw new Error('Failed to remove custom zone');
+            }
+        } catch (error) {
+            console.error('Error removing custom zone:', error);
+            this.showAlert('Failed to remove custom zone', 'danger');
+        }
+    }
+
+
+
+    onMouseDown(event) {
+        if (this.currentTool === 'select') return;
+
+        const pointer = this.canvas.getPointer(event.e);
+        this.isDrawing = true;
+        this.startPoint = pointer;
+
+        if (this.currentTool === 'bbox') {
+            // Get color for current classification
+            const color = this.currentClassification ? (this.zoneColors[this.currentClassification] || '#0066cc') : '#0066cc';
+            const fillColor = this.hexToRgba(color, 0.1);
+            
+            this.currentRect = new fabric.Rect({
+                left: pointer.x,
+                top: pointer.y,
+                width: 0,
+                height: 0,
+                fill: fillColor,
+                stroke: color,
+                strokeWidth: 2,
+                selectable: true,
+                lockUniScaling: false, // Allow free resizing
+                lockScalingFlip: false, // Allow negative scaling
+                uniformScaling: false, // Disable aspect ratio locking
+                uniScaleTransform: false, // Additional property to disable uniform scaling
+                centeredScaling: false, // Disable centered scaling
+                hasRotatingPoint: false, // Disable rotation
+                cornerStyle: 'rect', // Square corners for better UX
+                cornerSize: 8,
+                transparentCorners: false,
+                cornerColor: color,
+                lockMovementX: false,
+                lockMovementY: false
+            });
+            this.canvas.add(this.currentRect);
+        } else if (this.currentTool === 'polygon') {
+            // Get color for current classification
+            const color = this.currentClassification ? (this.zoneColors[this.currentClassification] || '#0066cc') : '#0066cc';
+            const fillColor = this.hexToRgba(color, 0.1);
+            
+            if (!this.currentPolygon) {
+                this.polygonPoints = [pointer];
+                this.currentPolygon = new fabric.Polygon([pointer], {
+                    fill: fillColor,
+                    stroke: color,
+                    strokeWidth: 2,
+                    selectable: true,
+                    hasRotatingPoint: false, // Disable rotation
+                    cornerStyle: 'circle', // Circle corners for polygons
+                    cornerSize: 6,
+                    transparentCorners: false,
+                    cornerColor: color
+                });
+                this.canvas.add(this.currentPolygon);
+            } else {
+                this.polygonPoints.push(pointer);
+                this.currentPolygon.set('points', this.polygonPoints);
+                this.canvas.renderAll();
+            }
+        }
+    }
+
+    onMouseMove(event) {
+        if (!this.isDrawing || this.currentTool === 'polygon') return;
+
+        const pointer = this.canvas.getPointer(event.e);
+
+        if (this.currentTool === 'bbox' && this.currentRect) {
+            const width = pointer.x - this.startPoint.x;
+            const height = pointer.y - this.startPoint.y;
+            
+            this.currentRect.set({
+                width: Math.abs(width),
+                height: Math.abs(height),
+                left: width > 0 ? this.startPoint.x : pointer.x,
+                top: height > 0 ? this.startPoint.y : pointer.y
+            });
+            this.canvas.renderAll();
+        }
+    }
+
+    async onMouseUp(event) {
+        if (this.currentTool === 'polygon') return;
+
+        this.isDrawing = false;
+
+        if (this.currentTool === 'bbox' && this.currentRect) {
+            if (this.currentRect.width < 5 || this.currentRect.height < 5) {
+                this.canvas.remove(this.currentRect);
+            } else {
+                await this.addAnnotation(this.currentRect, 'bbox');
+            }
+            this.currentRect = null;
+        }
+    }
+
+    async finishPolygon() {
+        if (this.currentPolygon && this.polygonPoints.length > 2) {
+            await this.addAnnotation(this.currentPolygon, 'polygon');
+            this.currentPolygon = null;
+            this.polygonPoints = [];
+        }
+    }
+
+    async addAnnotation(fabricObject, type) {
+        const tempId = 'temp_' + Date.now();
+        const coordinates = this.getAnnotationCoordinates(fabricObject, type);
+        const readingOrder = this.annotations.length;
+        
+        // Create local annotation with temp ID first
+        const localAnnotation = {
+            id: tempId,
+            type: type,
+            fabricObject: fabricObject,
+            coordinates: coordinates,
+            classification: this.currentClassification || null,
+            label: '',
+            reading_order: readingOrder,
+            transcription: null
+        };
+
+        this.annotations.push(localAnnotation);
+        fabricObject.annotationId = tempId;
+        this.updateAnnotationsList();
+
+        // Save to database
+        try {
+            if (!this.currentImage) {
+                console.error('No current image selected');
+                return;
+            }
+
+            const annotationData = {
+                image: this.currentImage.id,
+                annotation_type: type,
+                coordinates: coordinates,
+                classification: this.currentClassification || null,
+                label: '',
+                reading_order: readingOrder
+            };
+
+            const response = await fetch(`${this.apiBaseUrl}/annotations/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify(annotationData)
+            });
+
+            if (response.ok) {
+                const savedAnnotation = await response.json();
+                
+                // Update local annotation with real ID and reading order
+                const annotationIndex = this.annotations.findIndex(a => a.id === tempId);
+                if (annotationIndex !== -1) {
+                    this.annotations[annotationIndex].id = savedAnnotation.id;
+                    this.annotations[annotationIndex].reading_order = savedAnnotation.reading_order;
+                    this.annotations[annotationIndex].classification = savedAnnotation.classification;
+                    fabricObject.annotationId = savedAnnotation.id;
+                }
+                
+                console.log('Annotation saved successfully:', savedAnnotation.id);
+            } else {
+                console.error('Failed to save annotation:', await response.text());
+                this.showAlert('Failed to save annotation', 'warning');
+            }
+        } catch (error) {
+            console.error('Error saving annotation:', error);
+            this.showAlert('Error saving annotation', 'warning');
+        }
+    }
+
+    getAnnotationCoordinates(fabricObject, type) {
+        let canvasCoords;
+        
+        if (type === 'bbox') {
+            canvasCoords = {
+                x: fabricObject.left,
+                y: fabricObject.top,
+                width: fabricObject.width,
+                height: fabricObject.height
+            };
+        } else if (type === 'polygon') {
+            canvasCoords = {
+                points: fabricObject.points.map(point => ({
+                    x: point.x,
+                    y: point.y
+                }))
+            };
+        }
+        
+        // Transform back to original image coordinates
+        return this.transformToOriginal(canvasCoords, type);
+    }
+
+    onSelectionCreated(event) {
+        this.selectedAnnotations = event.selected.map(obj => obj.annotationId).filter(Boolean);
+        this.updateAnnotationsList();
+    }
+
+    onSelectionUpdated(event) {
+        this.selectedAnnotations = event.selected.map(obj => obj.annotationId).filter(Boolean);
+        this.updateAnnotationsList();
+    }
+
+    onSelectionCleared() {
+        this.selectedAnnotations = [];
+        this.updateAnnotationsList();
+    }
+
+    disableUniformScaling(event) {
+        // Force disable uniform scaling on selected objects
+        const selectedObjects = event.selected || [event.target];
+        selectedObjects.forEach(obj => {
+            if (obj && obj.type === 'rect') {
+                obj.set({
+                    lockUniScaling: false,
+                    uniformScaling: false,
+                    uniScaleTransform: false,
+                    centeredScaling: false,
+                    lockScalingX: false,
+                    lockScalingY: false
+                });
+                
+                // Override the scaling methods to force non-uniform behavior
+                obj._setOriginToCenter = function() {};
+                obj._resetOrigin = function() {};
+                
+                // Override corner controls to disable uniform scaling
+                if (obj.controls) {
+                    Object.keys(obj.controls).forEach(controlKey => {
+                        const control = obj.controls[controlKey];
+                        if (control && control.actionHandler === 'scalingEqually') {
+                            control.actionHandler = 'scalingXorY';
+                        }
+                    });
+                }
+            }
+        });
+        
+        // Also disable uniform scaling at canvas level for this interaction
+        this.canvas.uniformScaling = false;
+        this.canvas.uniScaleTransform = false;
+    }
+
+    async onObjectModified(event) {
+        const modifiedObject = event.target;
+        if (modifiedObject.annotationId && !modifiedObject.annotationId.startsWith('temp_')) {
+            // Save the updated annotation coordinates
+            await this.updateAnnotationCoordinates(modifiedObject);
+        }
+    }
+
+    async updateAnnotationCoordinates(fabricObject) {
+        try {
+            const annotation = this.annotations.find(a => a.id === fabricObject.annotationId);
+            if (!annotation) return;
+
+            let canvasCoordinates;
+            if (annotation.type === 'bbox') {
+                canvasCoordinates = {
+                    x: fabricObject.left,
+                    y: fabricObject.top,
+                    width: fabricObject.width * fabricObject.scaleX,
+                    height: fabricObject.height * fabricObject.scaleY
+                };
+                
+                // Reset scale after getting scaled dimensions
+                fabricObject.set({
+                    width: canvasCoordinates.width,
+                    height: canvasCoordinates.height,
+                    scaleX: 1,
+                    scaleY: 1,
+                    // Ensure free-form scaling properties are maintained
+                    lockUniScaling: false,
+                    uniformScaling: false,
+                    uniScaleTransform: false,
+                    centeredScaling: false
+                });
+            } else if (annotation.type === 'polygon') {
+                canvasCoordinates = {
+                    points: fabricObject.points.map(point => ({
+                        x: point.x,
+                        y: point.y
+                    }))
+                };
+            }
+
+            // Transform canvas coordinates back to original image coordinates
+            const newCoordinates = this.transformToOriginal(canvasCoordinates, annotation.type);
+
+            // Update local annotation
+            annotation.coordinates = newCoordinates;
+
+            // Save to backend
+            const response = await fetch(`${this.apiBaseUrl}/annotations/${annotation.id}/`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({ coordinates: newCoordinates })
+            });
+
+            if (!response.ok) {
+                console.error('Failed to update annotation coordinates');
+                this.showAlert('Failed to save annotation changes', 'warning');
+            }
+        } catch (error) {
+            console.error('Error updating annotation coordinates:', error);
+            this.showAlert('Error saving annotation changes', 'warning');
+        }
+    }
+
+    // Project Management
+    async loadProjects() {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/projects/`, {
+                headers: {
+                    'Authorization': `Token ${this.authToken}`
+                }
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                this.renderProjectTree(data.results);
+            } else {
+                this.showAlert('Failed to load projects', 'danger');
+            }
+        } catch (error) {
+            console.error('Error loading projects:', error);
+            this.showAlert('Failed to load projects', 'danger');
+        }
+    }
+
+    renderProjectTree(projects) {
+        const treeContainer = document.getElementById('projectTree');
+        treeContainer.innerHTML = '';
+
+        if (projects.length === 0) {
+            treeContainer.innerHTML = '<div class="p-3 text-muted">No projects yet. Create your first project!</div>';
+            return;
+        }
+
+        projects.forEach(project => {
+            const projectElement = this.createProjectTreeItem(project);
+            treeContainer.appendChild(projectElement);
+        });
+    }
+
+    createProjectTreeItem(project) {
+        const projectDiv = document.createElement('div');
+        projectDiv.className = 'tree-item project-item';
+        projectDiv.dataset.projectId = project.id;
+        
+        projectDiv.innerHTML = `
+            <div class="tree-item-content" onclick="app.toggleProject('${project.id}')">
+                <i class="fas fa-caret-right tree-toggle"></i>
+                <i class="fas fa-folder tree-icon"></i>
+                <span class="tree-text">${project.name}</span>
+                <div class="tree-actions">
+                    <button class="btn btn-sm btn-outline-primary" onclick="event.stopPropagation(); app.showCreateDocumentModal('${project.id}')" title="Add Document">
+                        <i class="fas fa-file-plus"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); app.deleteProject('${project.id}')" title="Delete Project">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="tree-children" style="display: none;"></div>
+        `;
+        
+        return projectDiv;
+    }
+
+    createTreeItem(text, icon, indent, onClick) {
+        const item = document.createElement('div');
+        item.className = `tree-item indent-${indent}`;
+        item.innerHTML = `
+            <i class="${icon} tree-icon"></i>
+            <span>${text}</span>
+        `;
+        item.addEventListener('click', onClick);
+        return item;
+    }
+
+    async toggleProject(projectId) {
+        const projectItem = document.querySelector(`[data-project-id="${projectId}"]`);
+        const toggle = projectItem.querySelector('.tree-toggle');
+        const children = projectItem.querySelector('.tree-children');
+        
+        if (children.style.display === 'none') {
+            // Expand project
+            toggle.classList.remove('fa-caret-right');
+            toggle.classList.add('fa-caret-down');
+            children.style.display = 'block';
+            
+            // Load documents if not already loaded
+            if (children.children.length === 0) {
+                await this.loadProjectDocuments(projectId, children);
+            }
+        } else {
+            // Collapse project
+            toggle.classList.remove('fa-caret-down');
+            toggle.classList.add('fa-caret-right');
+            children.style.display = 'none';
+        }
+    }
+
+    async loadProjectDocuments(projectId, container) {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/documents/?project=${projectId}`, {
+                headers: {
+                    'Authorization': `Token ${this.authToken}`
+                }
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                this.renderDocuments(data.results, container);
+            }
+        } catch (error) {
+            console.error('Error loading documents:', error);
+            container.innerHTML = '<div class="text-muted p-2">Error loading documents</div>';
+        }
+    }
+
+    renderDocuments(documents, container) {
+        if (documents.length === 0) {
+            container.innerHTML = '<div class="text-muted p-2 ms-3">No documents yet</div>';
+            return;
+        }
+
+        documents.forEach(docItem => {
+            const documentElement = this.createDocumentTreeItem(docItem);
+            container.appendChild(documentElement);
+        });
+    }
+
+    createDocumentTreeItem(docItem) {
+        const documentDiv = document.createElement('div');
+        documentDiv.className = 'tree-item document-item ms-3';
+        documentDiv.dataset.documentId = docItem.id;
+        
+        documentDiv.innerHTML = `
+            <div class="tree-item-content" onclick="app.toggleDocument('${docItem.id}')">
+                <i class="fas fa-caret-right tree-toggle"></i>
+                <i class="fas fa-file-alt tree-icon"></i>
+                <span class="tree-text">${docItem.name}</span>
+                <div class="tree-actions">
+                    <button class="btn btn-sm btn-outline-success" onclick="event.stopPropagation(); app.showUploadImageModal('${docItem.id}')" title="Add Images">
+                        <i class="fas fa-image"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); app.deleteDocument('${docItem.id}')" title="Delete Document">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="tree-children" style="display: none;"></div>
+        `;
+        
+        return documentDiv;
+    }
+
+    async toggleDocument(documentId) {
+        const documentItem = document.querySelector(`[data-document-id="${documentId}"]`);
+        const toggle = documentItem.querySelector('.tree-toggle');
+        const children = documentItem.querySelector('.tree-children');
+        
+        if (children.style.display === 'none') {
+            // Expand document
+            toggle.classList.remove('fa-caret-right');
+            toggle.classList.add('fa-caret-down');
+            children.style.display = 'block';
+            
+            // Load images if not already loaded
+            if (children.children.length === 0) {
+                await this.loadDocumentImages(documentId, children);
+            }
+        } else {
+            // Collapse document
+            toggle.classList.remove('fa-caret-down');
+            toggle.classList.add('fa-caret-right');
+            children.style.display = 'none';
+        }
+    }
+
+    async loadDocumentImages(documentId, container) {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}`, {
+                headers: {
+                    'Authorization': `Token ${this.authToken}`
+                }
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                this.renderImages(data.results, container);
+            }
+        } catch (error) {
+            console.error('Error loading images:', error);
+            container.innerHTML = '<div class="text-muted p-2">Error loading images</div>';
+        }
+    }
+
+    renderImages(images, container) {
+        if (images.length === 0) {
+            container.innerHTML = '<div class="text-muted p-2 ms-3">No images yet</div>';
+            return;
+        }
+
+        images.forEach(image => {
+            const imageElement = this.createImageTreeItem(image);
+            container.appendChild(imageElement);
+        });
+    }
+
+    createImageTreeItem(image) {
+        const imageDiv = document.createElement('div');
+        imageDiv.className = 'tree-item image-item ms-4';
+        imageDiv.dataset.imageId = image.id;
+        
+        imageDiv.innerHTML = `
+            <div class="tree-item-content" onclick="app.selectImage('${image.id}')">
+                <i class="fas fa-image tree-icon"></i>
+                <span class="tree-text">${image.name}</span>
+                <div class="tree-actions">
+                    <button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); app.deleteImage('${image.id}')" title="Delete Image">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+                <div class="tree-status">
+                    ${image.is_processed ? 
+                        '<i class="fas fa-check-circle text-success" title="Processed"></i>' : 
+                        '<i class="fas fa-clock text-warning" title="Processing"></i>'
+                    }
+                </div>
+            </div>
+        `;
+        
+        return imageDiv;
+    }
+
+    // OCR and Transcription
+    async transcribeFullImage() {
+        if (!this.currentImage) {
+            this.showAlert('Please select an image first', 'warning');
+            return;
+        }
+
+        const credentials = this.getStoredCredentials();
+        if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+            this.showAlert('Please configure your API credentials first', 'warning');
+            this.showCredentialsModal();
+            return;
+        }
+
+        try {
+            // Show processing indicator in the transcription section
+            this.showFullImageTranscriptionProgress(true);
+            
+            const requestData = {
+                transcription_type: 'full_image',
+                api_endpoint: credentials.openai_api_key ? 'openai' : credentials.custom_endpoint_url,
+                api_model: 'gpt-4o-mini'
+            };
+
+            if (credentials.openai_api_key) {
+                requestData.openai_api_key = credentials.openai_api_key;
+            } else {
+                requestData.custom_endpoint_auth = credentials.custom_endpoint_auth;
+            }
+
+            const response = await fetch(`${this.apiBaseUrl}/images/${this.currentImage.id}/transcribe/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify(requestData)
+            });
+
+            if (response.ok) {
+                const transcription = await response.json();
+                this.updateTranscriptionDisplay(transcription);
+                this.showAlert('Transcription completed!', 'success');
+            } else {
+                const error = await response.json();
+                this.showAlert(error.error || 'Transcription failed', 'danger');
+            }
+        } catch (error) {
+            console.error('Transcription error:', error);
+            this.showAlert('Transcription failed', 'danger');
+        } finally {
+            this.showFullImageTranscriptionProgress(false);
+        }
+    }
+
+    async transcribeSelectedAnnotations() {
+        if (this.selectedAnnotations.length === 0) {
+            this.showAlert('Please select annotations to transcribe', 'warning');
+            return;
+        }
+
+        const credentials = this.getStoredCredentials();
+        if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+            this.showAlert('Please configure your API credentials first', 'warning');
+            this.showCredentialsModal();
+            return;
+        }
+
+        for (const annotationId of this.selectedAnnotations) {
+            this.showAnnotationProgress(annotationId, true);
+            await this.transcribeAnnotation(annotationId, credentials);
+            this.showAnnotationProgress(annotationId, false);
+        }
+    }
+
+    async transcribeAnnotation(annotationId, credentials) {
+        try {
+            const annotation = this.annotations.find(a => a.id === annotationId);
+            if (!annotation) {
+                console.error('Annotation not found:', annotationId);
+                return;
+            }
+
+            // Find the appropriate prompt for this annotation's classification
+            const prompt = this.getPromptForAnnotation(annotation);
+            let finalPrompt = prompt.prompt;
+            
+            const requestData = {
+                transcription_type: 'annotation',
+                api_endpoint: credentials.openai_api_key ? 'openai' : credentials.custom_endpoint_url,
+                api_model: 'gpt-4o-mini',
+                custom_prompt: finalPrompt,
+                expected_metadata: prompt.metadata_fields || []
+            };
+
+            if (credentials.openai_api_key) {
+                requestData.openai_api_key = credentials.openai_api_key;
+                // For OpenAI, use structured output if metadata is expected
+                if (prompt.metadata_fields && prompt.metadata_fields.length > 0) {
+                    requestData.use_structured_output = true;
+                    requestData.metadata_schema = this.createMetadataSchema(prompt.metadata_fields);
+                } else {
+                    // For OpenAI without structured output, still format the prompt for JSON response
+                    finalPrompt += '\n\nReturn the transcription as plain text. The main text should be clean and readable.';
+                    requestData.custom_prompt = finalPrompt;
+                }
+            } else {
+                // For other models, modify prompt to request JSON output
+                if (prompt.metadata_fields && prompt.metadata_fields.length > 0) {
+                    finalPrompt += '\n\nPlease also return metadata in JSON format with the following fields: ' +
+                        prompt.metadata_fields.map(f => `${f.name} (${f.type})`).join(', ') +
+                        '. Return both the transcription and metadata in a JSON object with "text" and "metadata" keys in the following format:\n\n```json\n{"text": "your transcription here", "metadata": {"field1": value1, "field2": value2}}\n```';
+                }
+                requestData.custom_prompt = finalPrompt;
+                requestData.custom_endpoint_auth = credentials.custom_endpoint_auth;
+            }
+
+            const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/transcribe/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify(requestData)
+            });
+
+            if (response.ok) {
+                const transcription = await response.json();
+                this.updateAnnotationTranscription(annotationId, transcription);
+            }
+        } catch (error) {
+            console.error('Annotation transcription error:', error);
+        }
+    }
+
+    getPromptForAnnotation(annotation) {
+        // If no classification, use default prompt
+        if (!annotation.classification) {
+            return this.getDefaultPrompt();
+        }
+
+        // Find prompt that applies to this classification
+        const applicablePrompt = this.customPrompts.find(prompt => 
+            prompt.zones && prompt.zones.includes(annotation.classification)
+        );
+
+        return applicablePrompt || this.getDefaultPrompt();
+    }
+
+    getDefaultPrompt() {
+        // Look for default prompt first
+        const defaultPrompt = this.customPrompts.find(p => p.is_default);
+        if (defaultPrompt) return defaultPrompt;
+
+        // Fallback prompt
+        return {
+            prompt: 'Transcribe this text accurately, preserving formatting and structure.',
+            metadata_fields: [
+                { name: 'handwritten', type: 'boolean', default: false },
+                { name: 'typed', type: 'boolean', default: true },
+                { name: 'language', type: 'string', default: 'en' }
+            ]
+        };
+    }
+
+    createMetadataSchema(metadataFields) {
+        const properties = {};
+        const required = [];
+
+        metadataFields.forEach(field => {
+            switch (field.type) {
+                case 'boolean':
+                    properties[field.name] = { 
+                        type: 'boolean',
+                        description: `Whether the text is ${field.name}`
+                    };
+                    break;
+                case 'string':
+                    properties[field.name] = { 
+                        type: 'string',
+                        description: `The ${field.name} of the text`
+                    };
+                    break;
+                case 'number':
+                    properties[field.name] = { 
+                        type: 'number',
+                        description: `The ${field.name} value`
+                    };
+                    break;
+            }
+            required.push(field.name);
+        });
+
+        return {
+            type: 'object',
+            properties: {
+                text: {
+                    type: 'string',
+                    description: 'The transcribed text content'
+                },
+                metadata: {
+                    type: 'object',
+                    properties: properties,
+                    required: required
+                }
+            },
+            required: ['text', 'metadata']
+        };
+    }
+
+    async updateAnnotationMetadata(annotationId, metadata) {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({ metadata: metadata })
+            });
+
+            if (response.ok) {
+                // Update local annotation
+                const annotation = this.annotations.find(a => a.id === annotationId);
+                if (annotation) {
+                    annotation.metadata = { ...annotation.metadata, ...metadata };
+                }
+                
+                // Update UI to show new metadata
+                this.updateCombinedTranscription();
+            }
+        } catch (error) {
+            console.error('Error updating annotation metadata:', error);
+        }
+    }
+
+    updateTranscriptionDisplay(transcription) {
+        // Store the image transcription and update combined view
+        this.currentImageTranscription = transcription;
+        this.updateCombinedTranscription();
+    }
+
+    updateAnnotationTranscription(annotationId, transcription) {
+        // Find and update the annotation with its transcription
+        const annotation = this.annotations.find(a => a.id === annotationId);
+        if (annotation) {
+            // Parse and clean the transcription response
+            const processedTranscription = this.processTranscriptionResponse(transcription);
+            annotation.transcription = processedTranscription;
+            
+            // If the processed transcription contains metadata, update the annotation
+            if (processedTranscription.parsed_metadata && Object.keys(processedTranscription.parsed_metadata).length > 0) {
+                this.updateAnnotationMetadata(annotationId, processedTranscription.parsed_metadata);
+            }
+        }
+        
+        // Update the UI
+        this.updateAnnotationsList();
+    }
+    
+    processTranscriptionResponse(transcription) {
+        // Clone the original transcription
+        const processed = { ...transcription };
+        let textContent = transcription.text_content || '';
+        let parsedMetadata = {};
+        
+        try {
+            // First try to extract JSON from text content if it looks like it contains JSON
+            if (textContent.includes('{') && textContent.includes('}')) {
+                // Try to extract JSON from markdown code blocks
+                const jsonBlockMatch = textContent.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+                if (jsonBlockMatch) {
+                    try {
+                        const jsonData = JSON.parse(jsonBlockMatch[1]);
+                        if (jsonData.text && jsonData.metadata) {
+                            textContent = jsonData.text;
+                            parsedMetadata = jsonData.metadata;
+                            processed.text_content = textContent;
+                            processed.parsed_metadata = parsedMetadata;
+                            return processed;
+                        }
+                    } catch (e) {
+                        console.log('Failed to parse JSON from code block:', e);
+                    }
+                }
+                
+                // Try to extract plain JSON object
+                const jsonMatch = textContent.match(/\{[\s\S]*\}/);
+                if (jsonMatch) {
+                    try {
+                        const jsonData = JSON.parse(jsonMatch[0]);
+                        if (jsonData.text && jsonData.metadata) {
+                            textContent = jsonData.text;
+                            parsedMetadata = jsonData.metadata;
+                            processed.text_content = textContent;
+                            processed.parsed_metadata = parsedMetadata;
+                            return processed;
+                        } else if (jsonData.text) {
+                            textContent = jsonData.text;
+                            processed.text_content = textContent;
+                            return processed;
+                        }
+                    } catch (e) {
+                        console.log('Failed to parse JSON object:', e);
+                    }
+                }
+            }
+            
+            // If no JSON found or parsing failed, check if we have metadata in the transcription object itself
+            if (transcription.metadata && Object.keys(transcription.metadata).length > 0) {
+                parsedMetadata = transcription.metadata;
+                processed.parsed_metadata = parsedMetadata;
+            }
+            
+        } catch (error) {
+            console.error('Error processing transcription response:', error);
+        }
+        
+        return processed;
+    }
+
+    updateAnnotationsList() {
+        // This function now just updates the combined transcription
+        // since the old annotations list has been removed
+        this.updateCombinedTranscription();
+    }
+
+    selectAnnotation(annotationId) {
+        const annotation = this.annotations.find(a => a.id === annotationId);
+        if (annotation && annotation.fabricObject) {
+            this.canvas.setActiveObject(annotation.fabricObject);
+            this.canvas.renderAll();
+        }
+    }
+
+    // Note: Old annotation drag handlers removed since annotations section was removed
+
+    async reorderAnnotations(draggedId, targetId) {
+        // Find indices of dragged and target annotations
+        const sortedAnnotations = [...this.annotations].sort((a, b) => {
+            const orderA = a.reading_order !== undefined ? a.reading_order : 999999;
+            const orderB = b.reading_order !== undefined ? b.reading_order : 999999;
+            return orderA - orderB;
+        });
+
+        const draggedIndex = sortedAnnotations.findIndex(a => a.id === draggedId);
+        const targetIndex = sortedAnnotations.findIndex(a => a.id === targetId);
+
+        if (draggedIndex === -1 || targetIndex === -1) return;
+
+        // Reorder locally
+        const [draggedAnnotation] = sortedAnnotations.splice(draggedIndex, 1);
+        sortedAnnotations.splice(targetIndex, 0, draggedAnnotation);
+
+        // Update reading orders
+        sortedAnnotations.forEach((annotation, index) => {
+            annotation.reading_order = index;
+        });
+
+        // Update the main annotations array
+        this.annotations.forEach(annotation => {
+            const reorderedAnnotation = sortedAnnotations.find(a => a.id === annotation.id);
+            if (reorderedAnnotation) {
+                annotation.reading_order = reorderedAnnotation.reading_order;
+            }
+        });
+
+        // Save to backend
+        await this.saveAnnotationOrder();
+
+        // Update UI
+        this.updateAnnotationsList();
+    }
+
+    async saveAnnotationOrder() {
+        try {
+            const orderData = this.annotations.map(annotation => ({
+                id: annotation.id,
+                reading_order: annotation.reading_order
+            }));
+
+            await fetch(`${this.apiBaseUrl}/images/${this.currentImage.id}/annotations/reorder/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({ annotations: orderData })
+            });
+        } catch (error) {
+            console.error('Error saving annotation order:', error);
+            this.showAlert('Failed to save annotation order', 'warning');
+        }
+    }
+
+    updateCombinedTranscription() {
+        const transcriptionContent = document.getElementById('transcriptionContent');
+        
+        // Get current image transcription
+        const imageTranscription = this.currentImageTranscription;
+        
+        // Get all annotations in reading order  
+        const sortedAnnotations = [...this.annotations]
+            .sort((a, b) => {
+                const orderA = a.reading_order !== undefined ? a.reading_order : 999999;
+                const orderB = b.reading_order !== undefined ? b.reading_order : 999999;
+                return orderA - orderB;
+            });
+
+        // Get only transcribed annotations for combined text
+        const transcribedAnnotations = sortedAnnotations.filter(a => a.transcription && a.transcription.text_content);
+
+        let content = '';
+
+        if (imageTranscription && imageTranscription.text_content) {
+            const isExpanded = localStorage.getItem('fullImageExpanded') !== 'false';
+            content += `
+                <div class="transcription-section mb-3 collapsible-section">
+                    <div class="section-header" onclick="app.toggleSection('fullImage', this)">
+                        <h6><i class="fas fa-image me-2"></i>Full Image Transcription</h6>
+                        <i class="fas fa-chevron-${isExpanded ? 'down' : 'right'} toggle-icon"></i>
+                    </div>
+                    <div class="section-content" ${isExpanded ? '' : 'style="display: none;"'}>
+                        <div class="transcription-text border p-2 rounded">${this.escapeHtml(imageTranscription.text_content)}</div>
+                        <div class="mt-2">
+                            <span class="badge bg-${imageTranscription.status === 'completed' ? 'success' : 'warning'}">
+                                ${imageTranscription.status}
+                            </span>
+                            ${imageTranscription.confidence_score ? 
+                                `<span class="badge bg-info ms-2">Confidence: ${(imageTranscription.confidence_score * 100).toFixed(1)}%</span>` 
+                                : ''
+                            }
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        if (transcribedAnnotations.length > 0) {
+            const combinedText = transcribedAnnotations.map(a => a.transcription.text_content).join('\n\n');
+            const isCombinedExpanded = localStorage.getItem('combinedExpanded') !== 'false';
+            content += `
+                <div class="transcription-section mb-3 collapsible-section">
+                    <div class="section-header" onclick="app.toggleSection('combined', this)">
+                        <h6><i class="fas fa-puzzle-piece me-2"></i>Combined Annotation Transcription</h6>
+                        <i class="fas fa-chevron-${isCombinedExpanded ? 'down' : 'right'} toggle-icon"></i>
+                    </div>
+                    <div class="section-content" ${isCombinedExpanded ? '' : 'style="display: none;"'}>
+                        <div class="transcription-text border p-2 rounded">${this.escapeHtml(combinedText)}</div>
+                        <small class="text-muted">Assembled from ${transcribedAnnotations.length} annotations in reading order</small>
+                    </div>
+                </div>
+            `;
+
+        }
+
+        // Always show Individual Annotations section if there are any annotations
+        if (sortedAnnotations.length > 0) {
+            const isIndividualExpanded = localStorage.getItem('individualExpanded') !== 'false';
+            content += `
+                <div class="transcription-section collapsible-section">
+                    <div class="section-header" onclick="app.toggleSection('individual', this)">
+                        <h6><i class="fas fa-list me-2"></i>Individual Annotations</h6>
+                        <i class="fas fa-chevron-${isIndividualExpanded ? 'down' : 'right'} toggle-icon"></i>
+                    </div>
+                    <div class="section-content" ${isIndividualExpanded ? '' : 'style="display: none;"'}>
+                        <div class="annotation-transcriptions" id="transcriptionList">
+                            ${sortedAnnotations.map((annotation, index) => {
+                                const hasTranscription = annotation.transcription && annotation.transcription.text_content;
+                                const classificationType = this.getClassificationType(annotation.classification);
+                                const metadataDisplay = this.formatMetadataDisplay(annotation.metadata);
+                                const classificationColor = annotation.classification ? (this.zoneColors[annotation.classification] || '#6c757d') : '#6c757d';
+                                const borderColor = annotation.classification ? classificationColor : '#dee2e6';
+                                return `
+                                <div class="transcription-item mb-2 p-2 border rounded ${this.selectedAnnotations.includes(annotation.id) ? 'selected' : ''}" 
+                                     data-annotation-id="${annotation.id}" 
+                                     draggable="true"
+                                     onclick="app.selectAnnotationFromItem(event, '${annotation.id}')"
+                                     style="cursor: pointer; border-left: 4px solid ${borderColor} !important;">
+                                    <div class="d-flex justify-content-between align-items-center mb-1">
+                                        <div class="d-flex align-items-center">
+                                            <i class="fas fa-grip-vertical text-muted me-2" style="cursor: grab;"></i>
+                                            <span class="badge bg-primary me-2">${index + 1}</span>
+                                            <small class="text-muted">${annotation.type}</small>
+                                            <span class="badge classification-badge ms-2" 
+                                                  onclick="app.quickEditClassification(event, '${annotation.id}')" 
+                                                  style="cursor: pointer; background-color: ${classificationColor} !important; color: white;" 
+                                                  title="Click to change classification"
+                                                  id="classification-display-${annotation.id}">
+                                                ${annotation.classification || 'NoZoneSelected'}
+                                            </span>
+                                        </div>
+                                        <div class="btn-group" role="group">
+                                            <button class="btn btn-sm btn-outline-primary" onclick="app.selectAnnotationFromTranscription('${annotation.id}')" title="Select on canvas">
+                                                <i class="fas fa-crosshairs"></i>
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" onclick="app.toggleInlineEdit('${annotation.id}')" title="Edit annotation" id="edit-btn-${annotation.id}">
+                                                <i class="fas fa-edit"></i>
+                                            </button>
+                                            ${hasTranscription ? `
+                                                <button class="btn btn-sm btn-outline-danger" onclick="app.removeTranscription('${annotation.id}')" title="Remove transcription">
+                                                    <i class="fas fa-times"></i>
+                                                </button>
+                                            ` : `
+                                                <button class="btn btn-sm btn-outline-success" onclick="app.transcribeAnnotationFromList('${annotation.id}')" title="Transcribe annotation">
+                                                    <i class="fas fa-robot"></i>
+                                                </button>
+                                            `}
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- Inline Edit Form (hidden by default) -->
+                                    <div class="inline-edit-form" id="inline-edit-${annotation.id}" style="display: none;">
+                                        <div class="mb-2">
+                                            <label class="form-label small">Classification:</label>
+                                            <select class="form-select form-select-sm" id="inline-classification-${annotation.id}">
+                                                <option value="">NoZoneSelected</option>
+                                                ${this.generateClassificationOptions(annotation.classification)}
+                                            </select>
+                                        </div>
+                                        <div class="mb-2">
+                                            <label class="form-label small">Label:</label>
+                                            <input type="text" class="form-control form-control-sm" 
+                                                   id="inline-label-${annotation.id}" value="${annotation.label || ''}">
+                                        </div>
+                                        <div class="mb-3" id="inline-metadata-${annotation.id}">
+                                            ${this.generateInlineMetadataFields(annotation)}
+                                        </div>
+                                    </div>
+                                    
+                                    ${metadataDisplay ? `
+                                        <div class="metadata-display mb-2" id="metadata-display-${annotation.id}">
+                                            <small class="text-muted">Metadata:</small>
+                                            <div class="metadata-content small">${metadataDisplay}</div>
+                                        </div>
+                                    ` : ''}
+                                    <div class="transcription-text-content">
+                                        ${hasTranscription ? `
+                                            <div class="transcription-display" id="transcription-display-${annotation.id}">
+                                                <div class="small transcription-text-item">${this.escapeHtml(annotation.transcription.text_content)}</div>
+                                            </div>
+                                            <div class="transcription-edit-form" id="transcription-edit-${annotation.id}" style="display: none;">
+                                                <label class="form-label small">Transcription:</label>
+                                                <textarea class="form-control form-control-sm" id="transcription-textarea-${annotation.id}" rows="8">${annotation.transcription.text_content}</textarea>
+                                                
+                                                <!-- Save buttons at the bottom -->
+                                                <div class="d-flex gap-1 mt-3">
+                                                    <button class="btn btn-sm btn-success" onclick="app.saveInlineEdit('${annotation.id}')">
+                                                        <i class="fas fa-check"></i> Save All Changes
+                                                    </button>
+                                                    <button class="btn btn-sm btn-secondary" onclick="app.cancelInlineEdit('${annotation.id}')">
+                                                        <i class="fas fa-times"></i> Cancel
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ` : `
+                                            <div class="small text-muted not-transcribed">
+                                                <i class="fas fa-robot me-1"></i>Not transcribed yet
+                                            </div>
+                                            
+                                            <!-- Save buttons for non-transcribed annotations in edit mode -->
+                                            <div class="edit-only-buttons" id="edit-buttons-${annotation.id}" style="display: none;">
+                                                <div class="d-flex gap-1 mt-3">
+                                                    <button class="btn btn-sm btn-success" onclick="app.saveInlineEdit('${annotation.id}')">
+                                                        <i class="fas fa-check"></i> Save All Changes
+                                                    </button>
+                                                    <button class="btn btn-sm btn-secondary" onclick="app.cancelInlineEdit('${annotation.id}')">
+                                                        <i class="fas fa-times"></i> Cancel
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        `}
+                                    </div>
+                                </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        if (!content) {
+            content = '<p class="text-muted">No transcriptions available. Transcribe the image or annotations to see results.</p>';
+        }
+
+        transcriptionContent.innerHTML = content;
+        
+        // Add drag and drop handlers for transcription items
+        this.initializeTranscriptionDragDrop();
+    }
+
+    toggleSection(sectionType, headerElement) {
+        const sectionElement = headerElement.closest('.collapsible-section');
+        const content = sectionElement.querySelector('.section-content');
+        const icon = sectionElement.querySelector('.toggle-icon');
+        
+        const isCurrentlyVisible = content.style.display !== 'none';
+        
+        if (isCurrentlyVisible) {
+            content.style.display = 'none';
+            icon.className = 'fas fa-chevron-right toggle-icon';
+            localStorage.setItem(`${sectionType}Expanded`, 'false');
+        } else {
+            content.style.display = 'block';
+            icon.className = 'fas fa-chevron-down toggle-icon';
+            localStorage.setItem(`${sectionType}Expanded`, 'true');
+        }
+    }
+
+    initializeTranscriptionDragDrop() {
+        const transcriptionList = document.getElementById('transcriptionList');
+        if (!transcriptionList) return;
+
+        const transcriptionItems = transcriptionList.querySelectorAll('.transcription-item');
+        transcriptionItems.forEach(item => {
+            item.addEventListener('dragstart', (e) => this.handleTranscriptionDragStart(e));
+            item.addEventListener('dragover', (e) => this.handleTranscriptionDragOver(e));
+            item.addEventListener('dragenter', (e) => this.handleTranscriptionDragEnter(e));
+            item.addEventListener('dragleave', (e) => this.handleTranscriptionDragLeave(e));
+            item.addEventListener('drop', (e) => this.handleTranscriptionDrop(e));
+            item.addEventListener('dragend', (e) => this.handleTranscriptionDragEnd(e));
+        });
+    }
+
+    handleTranscriptionDragStart(e) {
+        this.draggedTranscriptionId = e.currentTarget.dataset.annotationId;
+        this.draggedElement = e.currentTarget;
+        
+        e.currentTarget.style.opacity = '0.5';
+        e.currentTarget.classList.add('dragging');
+        
+        // Set drag effect
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/html', e.currentTarget.outerHTML);
+    }
+
+    handleTranscriptionDragEnter(e) {
+        e.preventDefault();
+        if (e.currentTarget !== this.draggedElement) {
+            e.currentTarget.classList.add('drag-over');
+        }
+    }
+
+    handleTranscriptionDragLeave(e) {
+        // Only remove the class if we're actually leaving the element (not just moving to a child)
+        if (!e.currentTarget.contains(e.relatedTarget)) {
+            e.currentTarget.classList.remove('drag-over');
+        }
+    }
+
+    handleTranscriptionDragOver(e) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        
+        if (e.currentTarget === this.draggedElement) return;
+        
+        // Get the position within the element to determine insert position
+        const rect = e.currentTarget.getBoundingClientRect();
+        const midpoint = rect.top + rect.height / 2;
+        const mouseY = e.clientY;
+        
+        // Add visual indicator for drop position
+        e.currentTarget.classList.remove('drag-insert-above', 'drag-insert-below');
+        if (mouseY < midpoint) {
+            e.currentTarget.classList.add('drag-insert-above');
+            this.dropPosition = 'above';
+        } else {
+            e.currentTarget.classList.add('drag-insert-below');
+            this.dropPosition = 'below';
+        }
+    }
+
+    handleTranscriptionDrop(e) {
+        e.preventDefault();
+        
+        const targetElement = e.currentTarget;
+        const targetTranscriptionId = targetElement.dataset.annotationId;
+        
+        // Clean up visual indicators
+        this.clearDragVisualIndicators();
+        
+        if (this.draggedTranscriptionId && targetTranscriptionId && 
+            this.draggedTranscriptionId !== targetTranscriptionId) {
+            
+            // Determine if we should insert above or below the target
+            const insertAbove = this.dropPosition === 'above';
+            this.reorderTranscriptions(this.draggedTranscriptionId, targetTranscriptionId, insertAbove);
+        }
+    }
+
+    handleTranscriptionDragEnd(e) {
+        this.clearDragVisualIndicators();
+        
+        if (e.currentTarget) {
+            e.currentTarget.style.opacity = '1';
+            e.currentTarget.classList.remove('dragging');
+        }
+        
+        this.draggedTranscriptionId = null;
+        this.draggedElement = null;
+        this.dropPosition = null;
+    }
+    
+    clearDragVisualIndicators() {
+        const items = document.querySelectorAll('.transcription-item');
+        items.forEach(item => {
+            item.classList.remove('drag-over', 'drag-insert-above', 'drag-insert-below');
+        });
+    }
+
+    async reorderTranscriptions(draggedId, targetId, insertAbove = false) {
+        // Find all annotations sorted by reading order
+        const sortedAnnotations = [...this.annotations]
+            .sort((a, b) => {
+                const orderA = a.reading_order !== undefined ? a.reading_order : 999999;
+                const orderB = b.reading_order !== undefined ? b.reading_order : 999999;
+                return orderA - orderB;
+            });
+
+        const draggedIndex = sortedAnnotations.findIndex(a => a.id === draggedId);
+        const targetIndex = sortedAnnotations.findIndex(a => a.id === targetId);
+
+        if (draggedIndex === -1 || targetIndex === -1 || draggedIndex === targetIndex) return;
+
+        // Remove the dragged annotation
+        const [draggedAnnotation] = sortedAnnotations.splice(draggedIndex, 1);
+        
+        // Calculate the new target index after removal
+        let newTargetIndex = targetIndex;
+        if (draggedIndex < targetIndex) {
+            newTargetIndex = targetIndex - 1;
+        }
+        
+        // Insert above or below the target
+        if (insertAbove) {
+            sortedAnnotations.splice(newTargetIndex, 0, draggedAnnotation);
+        } else {
+            sortedAnnotations.splice(newTargetIndex + 1, 0, draggedAnnotation);
+        }
+
+        // Update reading orders for all annotations
+        sortedAnnotations.forEach((annotation, index) => {
+            annotation.reading_order = index;
+            // Also update in the main annotations array
+            const mainAnnotation = this.annotations.find(a => a.id === annotation.id);
+            if (mainAnnotation) {
+                mainAnnotation.reading_order = index;
+            }
+        });
+
+        // Save to backend
+        await this.saveAnnotationOrder();
+
+        // Update UI
+        this.updateAnnotationsList();
+        this.updateCombinedTranscription();
+    }
+
+    async selectAnnotationFromTranscription(annotationId) {
+        // Check for unsaved changes before switching selection
+        if (this.currentlyEditingId && this.currentlyEditingId !== annotationId && this.hasUnsavedChanges) {
+            const shouldProceed = await this.checkUnsavedChanges();
+            if (!shouldProceed) {
+                return; // User cancelled
+            }
+        }
+        
+        const annotation = this.annotations.find(a => a.id === annotationId);
+        if (annotation && annotation.fabricObject) {
+            // Clear current selection
+            this.canvas.discardActiveObject();
+            
+            // Select the annotation
+            this.canvas.setActiveObject(annotation.fabricObject);
+            this.canvas.renderAll();
+            
+            // Update selected annotations
+            this.selectedAnnotations = [annotationId];
+            this.updateCombinedTranscription();
+        }
+    }
+
+    async selectAnnotationFromItem(event, annotationId) {
+        // Don't select if clicking on buttons or other interactive elements
+        const target = event.target;
+        if (target.tagName === 'BUTTON' || 
+            target.tagName === 'I' || 
+            target.tagName === 'TEXTAREA' ||
+            target.closest('button') || 
+            target.closest('.btn-group') ||
+            target.closest('.transcription-edit-form') ||
+            target.closest('.inline-edit-form')) {
+            return;
+        }
+
+        // Check for unsaved changes before switching
+        if (this.currentlyEditingId && this.currentlyEditingId !== annotationId && this.hasUnsavedChanges) {
+            const shouldProceed = await this.checkUnsavedChanges();
+            if (!shouldProceed) {
+                return; // User cancelled, don't switch
+            }
+        }
+
+        // Prevent event bubbling
+        event.stopPropagation();
+        
+        // Select the annotation
+        this.selectAnnotationFromTranscription(annotationId);
+    }
+
+    editTranscription(annotationId) {
+        const textDiv = document.getElementById(`transcription-display-${annotationId}`);
+        const editDiv = document.getElementById(`transcription-edit-${annotationId}`);
+        
+        if (textDiv && editDiv) {
+            textDiv.style.display = 'none';
+            editDiv.style.display = 'block';
+            
+            // Focus on textarea
+            const textarea = document.getElementById(`transcription-textarea-${annotationId}`);
+            if (textarea) {
+                textarea.focus();
+                textarea.select();
+            }
+        }
+    }
+
+    async saveTranscriptionEdit(annotationId) {
+        const textarea = document.getElementById(`transcription-textarea-${annotationId}`);
+        if (!textarea) return; // No transcription to save
+        
+        const newText = textarea.value.trim();
+        
+        // Allow empty transcriptions (user might want to clear it)
+        try {
+            const annotation = this.annotations.find(a => a.id === annotationId);
+            if (annotation && annotation.transcription) {
+                // Update transcription in backend
+                const response = await fetch(`${this.apiBaseUrl}/transcriptions/${annotation.transcription.id}/`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({ text_content: newText })
+                });
+
+                if (response.ok) {
+                    // Update local annotation
+                    annotation.transcription.text_content = newText;
+                    return true; // Indicate success
+                } else {
+                    this.showAlert('Failed to update transcription', 'danger');
+                    return false;
+                }
+            }
+            return true; // No transcription to update
+        } catch (error) {
+            console.error('Error updating transcription:', error);
+            this.showAlert('Error updating transcription', 'danger');
+            return false;
+        }
+    }
+
+    cancelTranscriptionEdit(annotationId) {
+        const textDiv = document.getElementById(`transcription-display-${annotationId}`);
+        const editDiv = document.getElementById(`transcription-edit-${annotationId}`);
+        
+        if (editDiv) {
+            // Reset textarea to original value
+            const textarea = document.getElementById(`transcription-textarea-${annotationId}`);
+            const annotation = this.annotations.find(a => a.id === annotationId);
+            if (textarea && annotation && annotation.transcription) {
+                textarea.value = annotation.transcription.text_content;
+            }
+            
+            // Only hide/show if not in inline editing mode
+            const inlineEditForm = document.getElementById(`inline-edit-${annotationId}`);
+            if (!inlineEditForm || inlineEditForm.style.display === 'none') {
+                if (textDiv) textDiv.style.display = 'block';
+                editDiv.style.display = 'none';
+            }
+        }
+    }
+
+    async transcribeAnnotationFromList(annotationId) {
+        const credentials = this.getStoredCredentials();
+        if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+            this.showAlert('Please configure your API credentials first', 'warning');
+            this.showCredentialsModal();
+            return;
+        }
+
+        try {
+            this.showAnnotationProgress(annotationId, true);
+            await this.transcribeAnnotation(annotationId, credentials);
+            this.showAlert('Annotation transcribed successfully!', 'success');
+        } catch (error) {
+            console.error('Annotation transcription error:', error);
+            this.showAlert('Transcription failed', 'danger');
+        } finally {
+            this.showAnnotationProgress(annotationId, false);
+        }
+    }
+
+    async removeTranscription(annotationId) {
+        if (confirm('Are you sure you want to remove this transcription?')) {
+            try {
+                const annotation = this.annotations.find(a => a.id === annotationId);
+                if (annotation && annotation.transcription) {
+                    // Remove transcription from backend
+                    const response = await fetch(`${this.apiBaseUrl}/transcriptions/${annotation.transcription.id}/`, {
+                        method: 'DELETE',
+                        headers: {
+                            'Authorization': `Token ${this.authToken}`
+                        }
+                    });
+
+                    if (response.ok) {
+                        // Remove from local annotation
+                        annotation.transcription = null;
+                        this.updateCombinedTranscription();
+                        this.showAlert('Transcription removed successfully', 'success');
+                    } else {
+                        this.showAlert('Failed to remove transcription', 'danger');
+                    }
+                }
+            } catch (error) {
+                console.error('Error removing transcription:', error);
+                this.showAlert('Error removing transcription', 'danger');
+            }
+        }
+    }
+
+    // Inline editing functions
+    generateClassificationOptions(currentClassification) {
+        let options = '';
+        
+        if (this.annotationTypes) {
+            // Add zone types (including custom zones)
+            if (this.userEnabledTypes.zones && this.userEnabledTypes.zones.length > 0) {
+                options += '<optgroup label="Zone Types">';
+                this.userEnabledTypes.zones.forEach(zoneCode => {
+                    // First check built-in zones
+                    let zoneType = this.annotationTypes.all_types.zones.find(z => z.value === zoneCode);
+                    
+                    // Then check custom zones
+                    if (!zoneType) {
+                        zoneType = this.customZones.find(z => z.value === zoneCode);
+                    }
+                    
+                    if (zoneType) {
+                        const selected = currentClassification === zoneType.value ? 'selected' : '';
+                        options += `<option value="${zoneType.value}" ${selected}>${zoneType.label}</option>`;
+                    }
+                });
+                options += '</optgroup>';
+            }
+            
+            // Add line types
+            if (this.userEnabledTypes.lines && this.userEnabledTypes.lines.length > 0) {
+                options += '<optgroup label="Line Types">';
+                this.userEnabledTypes.lines.forEach(lineCode => {
+                    const lineType = this.annotationTypes.all_types.lines.find(l => l.value === lineCode);
+                    if (lineType) {
+                        const selected = currentClassification === lineType.value ? 'selected' : '';
+                        options += `<option value="${lineType.value}" ${selected}>${lineType.label}</option>`;
+                    }
+                });
+                options += '</optgroup>';
+            }
+        }
+        
+        return options;
+    }
+    
+    generateInlineMetadataFields(annotation) {
+        const metadataFields = this.getMetadataFieldsForClassification(annotation.classification);
+        
+        // Add existing metadata that's not in the template
+        if (annotation.metadata && typeof annotation.metadata === 'object') {
+            const existingKeys = Object.keys(annotation.metadata);
+            const templateKeys = metadataFields.map(f => f.name);
+            
+            existingKeys.forEach(key => {
+                if (!templateKeys.includes(key)) {
+                    metadataFields.push({
+                        name: key,
+                        type: 'string',
+                        default: 'unparsed'
+                    });
+                }
+            });
+        }
+        
+        return metadataFields.map(field => {
+            const currentValue = annotation.metadata && annotation.metadata[field.name] !== undefined
+                ? annotation.metadata[field.name] 
+                : field.default;
+                
+            return this.createInlineMetadataFieldHtml(field, currentValue, annotation.id);
+        }).join('');
+    }
+    
+    createInlineMetadataFieldHtml(field, value, annotationId) {
+        const fieldId = `inline-meta-${annotationId}-${field.name}`;
+        const displayName = field.name.charAt(0).toUpperCase() + field.name.slice(1).replace(/_/g, ' ');
+        const isUnparsed = field.default === 'unparsed' || (typeof value === 'object' && value !== null);
+        
+        switch (field.type) {
+            case 'boolean':
+                return `
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="${fieldId}" ${value ? 'checked' : ''}>
+                        <label class="form-check-label small" for="${fieldId}">
+                            ${displayName}
+                            ${isUnparsed ? '<span class="badge bg-warning ms-1">unparsed</span>' : ''}
+                        </label>
+                    </div>
+                `;
+            case 'string':
+                const stringValue = isUnparsed && typeof value === 'object' ? 'unparsed' : (value || '');
+                const currentLength = stringValue.length;
+                
+                // Calculate rows based on content length
+                // For content < 1000 chars, size to fit content with minimum of 3 rows
+                // For content >= 1000 chars, start with size to accommodate ~1000 chars
+                let rows;
+                if (currentLength === 0) {
+                    rows = 3; // Empty content
+                } else if (currentLength < 1000) {
+                    // Size to fit content, minimum 3 rows
+                    rows = Math.max(3, Math.ceil(currentLength / 80));
+                } else {
+                    // Content is long, size for approximately 1000 characters
+                    rows = Math.ceil(1000 / 80);
+                }
+                
+                // Cap maximum rows at 15 for initial display
+                rows = Math.min(rows, 15);
+                
+                return `
+                    <div class="mb-1">
+                        <label for="${fieldId}" class="form-label small">
+                            ${displayName}
+                            ${isUnparsed ? '<span class="badge bg-warning ms-1">unparsed</span>' : ''}
+                        </label>
+                        <textarea class="form-control form-control-sm expandable-text" 
+                                  id="${fieldId}" rows="${rows}" 
+                                  placeholder="Enter ${displayName.toLowerCase()}...">${stringValue}</textarea>
+                    </div>
+                `;
+            case 'number':
+                return `
+                    <div class="mb-1">
+                        <label for="${fieldId}" class="form-label small">
+                            ${displayName}
+                            ${isUnparsed ? '<span class="badge bg-warning ms-1">unparsed</span>' : ''}
+                        </label>
+                        <input type="number" class="form-control form-control-sm" 
+                               id="${fieldId}" value="${value || ''}">
+                    </div>
+                `;
+            default:
+                return '';
+        }
+    }
+    
+    async toggleInlineEdit(annotationId) {
+        const editForm = document.getElementById(`inline-edit-${annotationId}`);
+        const metadataDisplay = document.getElementById(`metadata-display-${annotationId}`);
+        const transcriptionDisplay = document.getElementById(`transcription-display-${annotationId}`);
+        const transcriptionEdit = document.getElementById(`transcription-edit-${annotationId}`);
+        const editButtons = document.getElementById(`edit-buttons-${annotationId}`);
+        const editBtn = document.getElementById(`edit-btn-${annotationId}`);
+        
+        const isEditing = editForm.style.display !== 'none';
+        
+        if (isEditing) {
+            // Check for unsaved changes before canceling
+            if (this.hasUnsavedChanges) {
+                const shouldProceed = await this.checkUnsavedChanges();
+                if (!shouldProceed) {
+                    return; // User cancelled
+                }
+            }
+            // Cancel editing
+            this.cancelInlineEdit(annotationId);
+        } else {
+            // Check if another annotation is being edited
+            if (this.currentlyEditingId && this.currentlyEditingId !== annotationId && this.hasUnsavedChanges) {
+                const shouldProceed = await this.checkUnsavedChanges();
+                if (!shouldProceed) {
+                    return; // User cancelled
+                }
+            }
+            
+            // Start editing
+            this.startInlineEdit(annotationId);
+            editForm.style.display = 'block';
+            if (metadataDisplay) metadataDisplay.style.display = 'none';
+            if (transcriptionDisplay) transcriptionDisplay.style.display = 'none';
+            if (transcriptionEdit) {
+                transcriptionEdit.style.display = 'block';
+            } else if (editButtons) {
+                // Show save buttons for annotations without transcription
+                editButtons.style.display = 'block';
+            }
+            
+            editBtn.innerHTML = '<i class="fas fa-times"></i>';
+            editBtn.classList.remove('btn-outline-secondary');
+            editBtn.classList.add('btn-outline-warning');
+            editBtn.title = 'Cancel editing';
+            
+            // Add auto-resize functionality to text areas
+            this.setupAutoResizeTextareas(annotationId);
+            
+            // Start tracking changes
+            this.setupChangeTracking(annotationId);
+        }
+    }
+    
+    async saveInlineEdit(annotationId) {
+        const annotation = this.annotations.find(a => a.id === annotationId);
+        if (!annotation) return;
+        
+        try {
+            // Collect form data
+            const classification = document.getElementById(`inline-classification-${annotationId}`).value || null;
+            const label = document.getElementById(`inline-label-${annotationId}`).value || '';
+            
+            // Collect metadata
+            const metadata = {};
+            const metadataFields = this.getMetadataFieldsForClassification(classification);
+            
+            // Add existing metadata that might not be in template
+            if (annotation.metadata && typeof annotation.metadata === 'object') {
+                const existingKeys = Object.keys(annotation.metadata);
+                const templateKeys = metadataFields.map(f => f.name);
+                
+                existingKeys.forEach(key => {
+                    if (!templateKeys.includes(key)) {
+                        metadataFields.push({
+                            name: key,
+                            type: 'string',
+                            default: 'unparsed'
+                        });
+                    }
+                });
+            }
+            
+            metadataFields.forEach(field => {
+                const fieldElement = document.getElementById(`inline-meta-${annotationId}-${field.name}`);
+                if (fieldElement) {
+                    if (field.type === 'boolean') {
+                        metadata[field.name] = fieldElement.checked;
+                    } else if (field.type === 'number') {
+                        const numValue = parseFloat(fieldElement.value);
+                        metadata[field.name] = isNaN(numValue) ? 0 : numValue;
+                    } else {
+                        const value = fieldElement.value.trim();
+                        if (value !== '') {
+                            metadata[field.name] = value;
+                        }
+                    }
+                }
+            });
+            
+            // Save annotation changes
+            const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({
+                    classification: classification,
+                    label: label,
+                    metadata: metadata
+                })
+            });
+            
+            if (response.ok) {
+                // Update local annotation
+                annotation.classification = classification;
+                annotation.label = label;
+                annotation.metadata = metadata;
+                
+                // Save transcription if it was edited
+                const transcriptionSaved = await this.saveTranscriptionEdit(annotationId);
+                
+                // Reset edit state
+                this.currentlyEditingId = null;
+                this.hasUnsavedChanges = false;
+                this.originalFormData = null;
+                
+                // Cancel editing mode and refresh UI
+                this.cancelInlineEdit(annotationId);
+                this.updateCombinedTranscription();
+                
+                if (transcriptionSaved) {
+                    this.showAlert('All changes saved successfully!', 'success');
+                } else {
+                    this.showAlert('Annotation updated, but transcription save failed', 'warning');
+                }
+                
+                return true; // Indicate successful save
+            } else {
+                throw new Error('Failed to update annotation');
+            }
+        } catch (error) {
+            console.error('Error saving inline edit:', error);
+            this.showAlert('Failed to save changes', 'danger');
+            return false; // Indicate failed save
+        }
+    }
+    
+    setupAutoResizeTextareas(annotationId) {
+        // Find all textareas in the inline edit form
+        const editForm = document.getElementById(`inline-edit-${annotationId}`);
+        if (!editForm) return;
+        
+        const textareas = editForm.querySelectorAll('textarea');
+        textareas.forEach(textarea => {
+            // Initial resize
+            this.autoResizeTextarea(textarea);
+            
+            // Add event listeners for auto-resize
+            textarea.addEventListener('input', () => this.autoResizeTextarea(textarea));
+            textarea.addEventListener('paste', () => {
+                // Delay to allow paste content to be processed
+                setTimeout(() => this.autoResizeTextarea(textarea), 10);
+            });
+        });
+    }
+    
+    autoResizeTextarea(textarea) {
+        // Reset height to auto to get proper scrollHeight
+        textarea.style.height = 'auto';
+        
+        // Different min heights for different types of textareas
+        let minHeight = 60; // Default minimum height
+        if (textarea.id.includes('transcription-textarea')) {
+            minHeight = 150; // Larger minimum for transcription
+        } else if (textarea.classList.contains('expandable-text')) {
+            minHeight = 60; // Standard for metadata fields
+        }
+        
+        const maxHeight = 500; // Maximum height in pixels
+        const newHeight = Math.max(minHeight, Math.min(maxHeight, textarea.scrollHeight + 10));
+        
+        textarea.style.height = newHeight + 'px';
+    }
+    
+    startInlineEdit(annotationId) {
+        // End previous editing session if any
+        if (this.currentlyEditingId && this.currentlyEditingId !== annotationId) {
+            this.cancelInlineEdit(this.currentlyEditingId);
+        }
+        
+        this.currentlyEditingId = annotationId;
+        this.hasUnsavedChanges = false;
+        this.captureOriginalFormData(annotationId);
+    }
+    
+    captureOriginalFormData(annotationId) {
+        const annotation = this.annotations.find(a => a.id === annotationId);
+        if (!annotation) return;
+        
+        this.originalFormData = {
+            classification: annotation.classification || '',
+            label: annotation.label || '',
+            metadata: { ...annotation.metadata },
+            transcription: annotation.transcription ? annotation.transcription.text_content : ''
+        };
+    }
+    
+    setupChangeTracking(annotationId) {
+        // Track changes in all form inputs
+        const editForm = document.getElementById(`inline-edit-${annotationId}`);
+        const transcriptionTextarea = document.getElementById(`transcription-textarea-${annotationId}`);
+        
+        if (editForm) {
+            const inputs = editForm.querySelectorAll('input, select, textarea');
+            inputs.forEach(input => {
+                input.addEventListener('input', () => this.markAsChanged());
+                input.addEventListener('change', () => this.markAsChanged());
+            });
+        }
+        
+        if (transcriptionTextarea) {
+            transcriptionTextarea.addEventListener('input', () => this.markAsChanged());
+            transcriptionTextarea.addEventListener('change', () => this.markAsChanged());
+        }
+    }
+    
+    markAsChanged() {
+        this.hasUnsavedChanges = true;
+    }
+    
+    async checkUnsavedChanges() {
+        return new Promise((resolve) => {
+            // Create a custom confirmation dialog
+            const modalHtml = `
+                <div class="modal fade" id="unsavedChangesModal" tabindex="-1" data-bs-backdrop="static">
+                    <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title">
+                                    <i class="fas fa-exclamation-triangle text-warning me-2"></i>
+                                    Unsaved Changes
+                                </h5>
+                            </div>
+                            <div class="modal-body">
+                                <p>You have unsaved changes to the current annotation. What would you like to do?</p>
+                                <div class="alert alert-info small">
+                                    <i class="fas fa-info-circle me-1"></i>
+                                    Your changes will be lost if you don't save them.
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-success" id="saveChangesBtn">
+                                    <i class="fas fa-save me-1"></i>Save Changes
+                                </button>
+                                <button type="button" class="btn btn-outline-danger" id="discardChangesBtn">
+                                    <i class="fas fa-trash me-1"></i>Discard Changes
+                                </button>
+                                <button type="button" class="btn btn-secondary" id="cancelActionBtn">
+                                    <i class="fas fa-times me-1"></i>Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // Remove existing modal if any
+            const existingModal = document.getElementById('unsavedChangesModal');
+            if (existingModal) {
+                existingModal.remove();
+            }
+            
+            // Add modal to page
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+            
+            const modal = new bootstrap.Modal(document.getElementById('unsavedChangesModal'));
+            const saveBtn = document.getElementById('saveChangesBtn');
+            const discardBtn = document.getElementById('discardChangesBtn');
+            const cancelBtn = document.getElementById('cancelActionBtn');
+            
+            // Handle save
+            saveBtn.addEventListener('click', async () => {
+                modal.hide();
+                const saved = await this.saveInlineEdit(this.currentlyEditingId);
+                resolve(saved); // Proceed if save was successful
+            });
+            
+            // Handle discard
+            discardBtn.addEventListener('click', () => {
+                modal.hide();
+                this.cancelInlineEdit(this.currentlyEditingId);
+                resolve(true); // Proceed
+            });
+            
+            // Handle cancel
+            cancelBtn.addEventListener('click', () => {
+                modal.hide();
+                resolve(false); // Don't proceed
+            });
+            
+            // Clean up modal after it's hidden
+            document.getElementById('unsavedChangesModal').addEventListener('hidden.bs.modal', () => {
+                document.getElementById('unsavedChangesModal').remove();
+            });
+            
+            modal.show();
+        });
+    }
+
+    cancelInlineEdit(annotationId) {
+        const editForm = document.getElementById(`inline-edit-${annotationId}`);
+        const metadataDisplay = document.getElementById(`metadata-display-${annotationId}`);
+        const transcriptionDisplay = document.getElementById(`transcription-display-${annotationId}`);
+        const transcriptionEdit = document.getElementById(`transcription-edit-${annotationId}`);
+        const editButtons = document.getElementById(`edit-buttons-${annotationId}`);
+        const editBtn = document.getElementById(`edit-btn-${annotationId}`);
+        
+        // Reset edit state tracking
+        if (this.currentlyEditingId === annotationId) {
+            this.currentlyEditingId = null;
+            this.hasUnsavedChanges = false;
+            this.originalFormData = null;
+        }
+        
+        // Hide editing elements
+        editForm.style.display = 'none';
+        if (metadataDisplay) metadataDisplay.style.display = 'block';
+        if (transcriptionDisplay) transcriptionDisplay.style.display = 'block';
+        if (transcriptionEdit) transcriptionEdit.style.display = 'none';
+        if (editButtons) editButtons.style.display = 'none';
+        
+        // Reset button
+        editBtn.innerHTML = '<i class="fas fa-edit"></i>';
+        editBtn.classList.remove('btn-outline-warning');
+        editBtn.classList.add('btn-outline-secondary');
+        editBtn.title = 'Edit annotation';
+        
+        // Reset transcription textarea
+        this.cancelTranscriptionEdit(annotationId);
+    }
+
+    // Quick edit classification
+    quickEditClassification(event, annotationId) {
+        event.stopPropagation();
+        event.preventDefault();
+        
+        const annotation = this.annotations.find(a => a.id === annotationId);
+        if (!annotation) return;
+        
+        // Create a dropdown for quick selection
+        const target = event.target;
+        const dropdown = document.createElement('select');
+        dropdown.className = 'form-select form-select-sm';
+        dropdown.style.position = 'absolute';
+        dropdown.style.zIndex = '1000';
+        dropdown.style.minWidth = '150px';
+        
+        // Add options
+        dropdown.innerHTML = '<option value="">NoZoneSelected</option>';
+        
+        if (this.annotationTypes) {
+            // Add zone types (including custom zones)
+            if (this.userEnabledTypes.zones && this.userEnabledTypes.zones.length > 0) {
+                const zoneGroup = document.createElement('optgroup');
+                zoneGroup.label = 'Zone Types';
+                
+                this.userEnabledTypes.zones.forEach(zoneCode => {
+                    // First check built-in zones
+                    let zoneType = this.annotationTypes.all_types.zones.find(z => z.value === zoneCode);
+                    
+                    // Then check custom zones
+                    if (!zoneType) {
+                        zoneType = this.customZones.find(z => z.value === zoneCode);
+                    }
+                    
+                    if (zoneType) {
+                        const option = document.createElement('option');
+                        option.value = zoneType.value;
+                        option.textContent = zoneType.label;
+                        if (annotation.classification === zoneType.value) {
+                            option.selected = true;
+                        }
+                        zoneGroup.appendChild(option);
+                    }
+                });
+                
+                dropdown.appendChild(zoneGroup);
+            }
+            
+            // Add line types
+            if (this.userEnabledTypes.lines && this.userEnabledTypes.lines.length > 0) {
+                const lineGroup = document.createElement('optgroup');
+                lineGroup.label = 'Line Types';
+                
+                this.userEnabledTypes.lines.forEach(lineCode => {
+                    const lineType = this.annotationTypes.all_types.lines.find(l => l.value === lineCode);
+                    if (lineType) {
+                        const option = document.createElement('option');
+                        option.value = lineType.value;
+                        option.textContent = lineType.label;
+                        if (annotation.classification === lineType.value) {
+                            option.selected = true;
+                        }
+                        lineGroup.appendChild(option);
+                    }
+                });
+                
+                dropdown.appendChild(lineGroup);
+            }
+        }
+        
+        // Position dropdown
+        const rect = target.getBoundingClientRect();
+        dropdown.style.left = rect.left + 'px';
+        dropdown.style.top = (rect.bottom + 5) + 'px';
+        
+        // Add to body temporarily
+        document.body.appendChild(dropdown);
+        dropdown.focus();
+        
+        // Handle selection
+        dropdown.addEventListener('change', async () => {
+            const newClassification = dropdown.value || null;
+            await this.updateAnnotationClassification(annotationId, newClassification);
+            document.body.removeChild(dropdown);
+        });
+        
+        // Handle click away
+        dropdown.addEventListener('blur', () => {
+            if (document.body.contains(dropdown)) {
+                document.body.removeChild(dropdown);
+            }
+        });
+    }
+    
+    async updateAnnotationClassification(annotationId, newClassification) {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({
+                    classification: newClassification
+                })
+            });
+
+            if (response.ok) {
+                // Update local annotation
+                const annotation = this.annotations.find(a => a.id === annotationId);
+                if (annotation) {
+                    annotation.classification = newClassification;
+                }
+                
+                // Update UI
+                this.updateCombinedTranscription();
+                this.showAlert('Classification updated successfully!', 'success');
+            } else {
+                throw new Error('Failed to update classification');
+            }
+        } catch (error) {
+            console.error('Error updating classification:', error);
+            this.showAlert('Failed to update classification', 'danger');
+        }
+    }
+    
+    getClassificationType(classification) {
+        if (!classification || !this.annotationTypes) return null;
+        
+        // Check zones
+        const zoneType = this.annotationTypes.all_types.zones.find(z => z.value === classification);
+        if (zoneType) return zoneType.label;
+        
+        // Check lines
+        const lineType = this.annotationTypes.all_types.lines.find(l => l.value === classification);
+        if (lineType) return lineType.label;
+        
+        return classification;
+    }
+    
+    formatMetadataDisplay(metadata) {
+        if (!metadata || typeof metadata !== 'object' || Object.keys(metadata).length === 0) {
+            return null;
+        }
+        
+        try {
+            const metadataItems = Object.entries(metadata).map(([key, value]) => {
+                let displayValue;
+                if (typeof value === 'boolean') {
+                    displayValue = value ? '✓' : '✗';
+                } else if (typeof value === 'object') {
+                    displayValue = 'unparsed';
+                } else {
+                    displayValue = String(value);
+                }
+                return `<span class="metadata-item"><strong>${key}:</strong> ${displayValue}</span>`;
+            });
+            return metadataItems.join(' ');
+        } catch (error) {
+            return '<span class="text-warning">unparsed</span>';
+        }
+    }
+
+    // Progress Indicator Methods
+    showAnnotationProgress(annotationId, show) {
+        // Show spinner on canvas annotation
+        const annotation = this.annotations.find(a => a.id === annotationId);
+        if (annotation && annotation.fabricObject) {
+            if (show) {
+                // Add a spinning overlay to the fabric object
+                annotation.fabricObject.set({
+                    stroke: '#ff6600',
+                    strokeWidth: 3,
+                    strokeDashArray: [5, 5]
+                });
+                
+                // Animate the dash offset for a moving effect
+                this.animateAnnotationProgress(annotation.fabricObject);
+            } else {
+                // Reset to original styling
+                annotation.fabricObject.set({
+                    stroke: '#0066cc',
+                    strokeWidth: 2,
+                    strokeDashArray: null
+                });
+                
+                // Stop animation
+                if (annotation.fabricObject._progressAnimation) {
+                    clearInterval(annotation.fabricObject._progressAnimation);
+                    annotation.fabricObject._progressAnimation = null;
+                }
+            }
+            this.canvas.renderAll();
+        }
+
+        // Show spinner in transcription list
+        const transcriptionItem = document.querySelector(`[data-annotation-id="${annotationId}"]`);
+        if (transcriptionItem) {
+            let spinner = transcriptionItem.querySelector('.transcription-progress-spinner');
+            if (show) {
+                if (!spinner) {
+                    spinner = document.createElement('div');
+                    spinner.className = 'transcription-progress-spinner';
+                    spinner.innerHTML = '<i class="fas fa-spinner fa-spin text-primary me-2"></i>';
+                    
+                    const header = transcriptionItem.querySelector('.d-flex.justify-content-between');
+                    if (header) {
+                        header.appendChild(spinner);
+                    }
+                }
+            } else {
+                if (spinner) {
+                    spinner.remove();
+                }
+            }
+        }
+    }
+
+    animateAnnotationProgress(fabricObject) {
+        let offset = 0;
+        fabricObject._progressAnimation = setInterval(() => {
+            offset += 1;
+            fabricObject.set('strokeDashOffset', -offset);
+            if (this.canvas) {
+                this.canvas.renderAll();
+            }
+        }, 100);
+    }
+
+    showFullImageTranscriptionProgress(show) {
+        const transcriptionContent = document.getElementById('transcriptionContent');
+        if (!transcriptionContent) return;
+
+        let progressIndicator = document.getElementById('fullImageProgressIndicator');
+        
+        if (show) {
+            if (!progressIndicator) {
+                progressIndicator = document.createElement('div');
+                progressIndicator.id = 'fullImageProgressIndicator';
+                progressIndicator.className = 'alert alert-info d-flex align-items-center';
+                progressIndicator.innerHTML = `
+                    <i class="fas fa-spinner fa-spin me-2"></i>
+                    <span>Transcribing full image...</span>
+                `;
+                transcriptionContent.insertBefore(progressIndicator, transcriptionContent.firstChild);
+            }
+        } else {
+            if (progressIndicator) {
+                progressIndicator.remove();
+            }
+        }
+    }
+
+    // Utility Methods
+    escapeHtml(text) {
+        if (!text) return '';
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    // Credentials Management
+    getStoredCredentials() {
+        return {
+            openai_api_key: localStorage.getItem('openai_api_key'),
+            custom_endpoint_url: localStorage.getItem('custom_endpoint_url'),
+            custom_endpoint_auth: localStorage.getItem('custom_endpoint_auth')
+        };
+    }
+
+    saveCredentials() {
+        const openaiKey = document.getElementById('openaiApiKey').value;
+        const customEndpoint = document.getElementById('customEndpoint').value;
+        const customAuth = document.getElementById('customAuth').value;
+
+        if (openaiKey) {
+            localStorage.setItem('openai_api_key', openaiKey);
+        } else {
+            localStorage.removeItem('openai_api_key');
+        }
+
+        if (customEndpoint) {
+            localStorage.setItem('custom_endpoint_url', customEndpoint);
+        } else {
+            localStorage.removeItem('custom_endpoint_url');
+        }
+
+        if (customAuth) {
+            localStorage.setItem('custom_endpoint_auth', customAuth);
+        } else {
+            localStorage.removeItem('custom_endpoint_auth');
+        }
+
+        this.updateCredentialsStatus();
+        bootstrap.Modal.getInstance(document.getElementById('credentialsModal')).hide();
+        this.showAlert('Credentials saved successfully', 'success');
+    }
+
+    updateCredentialsStatus() {
+        const credentials = this.getStoredCredentials();
+        const statusBadge = document.getElementById('credentialsStatus');
+        
+        if (credentials.openai_api_key || credentials.custom_endpoint_url) {
+            statusBadge.textContent = 'Configured';
+            statusBadge.className = 'badge bg-success ms-2';
+        } else {
+            statusBadge.textContent = 'Not Set';
+            statusBadge.className = 'badge bg-warning ms-2';
+        }
+    }
+
+    showCredentialsModal() {
+        const modal = new bootstrap.Modal(document.getElementById('credentialsModal'));
+        
+        // Pre-fill existing values
+        const credentials = this.getStoredCredentials();
+        document.getElementById('openaiApiKey').value = credentials.openai_api_key || '';
+        document.getElementById('customEndpoint').value = credentials.custom_endpoint_url || '';
+        document.getElementById('customAuth').value = credentials.custom_endpoint_auth || '';
+        
+        modal.show();
+    }
+
+
+
+    // Legacy Annotation Editing (replaced by inline editing)
+    // editAnnotation(annotationId) {
+    //     const annotation = this.annotations.find(a => a.id === annotationId);
+    //     if (!annotation) return;
+
+    //     this.currentEditingAnnotation = annotation;
+    //     this.populateEditAnnotationModal(annotation);
+        
+    //     const modal = new bootstrap.Modal(document.getElementById('editAnnotationModal'));
+    //     modal.show();
+    // }
+
+    populateEditAnnotationModal(annotation) {
+        // Populate classification dropdown
+        const classificationSelect = document.getElementById('editAnnotationClassification');
+        classificationSelect.innerHTML = '<option value="">No classification</option>';
+        
+        if (this.annotationTypes) {
+            // Add zone types
+            if (this.userEnabledTypes.zones && this.userEnabledTypes.zones.length > 0) {
+                const zoneGroup = document.createElement('optgroup');
+                zoneGroup.label = 'Zone Types';
+                
+                this.userEnabledTypes.zones.forEach(zoneCode => {
+                    const zoneType = this.annotationTypes.all_types.zones.find(z => z.value === zoneCode);
+                    if (zoneType) {
+                        const option = document.createElement('option');
+                        option.value = zoneType.value;
+                        option.textContent = zoneType.label;
+                        zoneGroup.appendChild(option);
+                    }
+                });
+                
+                if (zoneGroup.children.length > 0) {
+                    classificationSelect.appendChild(zoneGroup);
+                }
+            }
+            
+            // Add line types
+            if (this.userEnabledTypes.lines && this.userEnabledTypes.lines.length > 0) {
+                const lineGroup = document.createElement('optgroup');
+                lineGroup.label = 'Line Types';
+                
+                this.userEnabledTypes.lines.forEach(lineCode => {
+                    const lineType = this.annotationTypes.all_types.lines.find(l => l.value === lineCode);
+                    if (lineType) {
+                        const option = document.createElement('option');
+                        option.value = lineType.value;
+                        option.textContent = lineType.label;
+                        lineGroup.appendChild(option);
+                    }
+                });
+                
+                if (lineGroup.children.length > 0) {
+                    classificationSelect.appendChild(lineGroup);
+                }
+            }
+        }
+
+        // Set current values
+        classificationSelect.value = annotation.classification || '';
+        document.getElementById('editAnnotationLabel').value = annotation.label || '';
+        
+        // Populate metadata fields
+        this.populateEditAnnotationMetadata(annotation);
+    }
+
+    populateEditAnnotationMetadata(annotation) {
+        const container = document.getElementById('editAnnotationMetadata');
+        container.innerHTML = '';
+        
+        // Get metadata template based on classification
+        let metadataFields = this.getMetadataFieldsForClassification(annotation.classification);
+        
+        // If annotation has existing metadata that's not in the template, add it as "unparsed"
+        if (annotation.metadata && typeof annotation.metadata === 'object') {
+            const existingKeys = Object.keys(annotation.metadata);
+            const templateKeys = metadataFields.map(f => f.name);
+            
+            existingKeys.forEach(key => {
+                if (!templateKeys.includes(key)) {
+                    metadataFields.push({
+                        name: key,
+                        type: 'string',
+                        default: 'unparsed'
+                    });
+                }
+            });
+        }
+        
+        metadataFields.forEach(field => {
+            const currentValue = annotation.metadata && annotation.metadata[field.name] !== undefined
+                ? annotation.metadata[field.name] 
+                : field.default;
+                
+            const fieldHtml = this.createMetadataFieldHtml(field, currentValue, 'edit');
+            container.insertAdjacentHTML('beforeend', fieldHtml);
+        });
+    }
+
+    getMetadataFieldsForClassification(classification) {
+        // Find the prompt that applies to this classification
+        const applicablePrompt = this.customPrompts.find(prompt => 
+            prompt.zones && prompt.zones.includes(classification)
+        );
+        
+        if (applicablePrompt && applicablePrompt.metadata_fields) {
+            return applicablePrompt.metadata_fields;
+        }
+        
+        // Default metadata fields
+        return [
+            { name: 'handwritten', type: 'boolean', default: false },
+            { name: 'typed', type: 'boolean', default: true },
+            { name: 'language', type: 'string', default: 'en' }
+        ];
+    }
+
+    createMetadataFieldHtml(field, value, prefix) {
+        const fieldId = `${prefix}_${field.name}`;
+        const displayName = field.name.charAt(0).toUpperCase() + field.name.slice(1).replace(/_/g, ' ');
+        const isUnparsed = field.default === 'unparsed' || (typeof value === 'object' && value !== null);
+        
+        let inputHtml = '';
+        switch (field.type) {
+            case 'boolean':
+                inputHtml = `
+                    <div class="form-check annotation-metadata-field">
+                        <input class="form-check-input" type="checkbox" id="${fieldId}" 
+                               ${value ? 'checked' : ''}>
+                        <label class="form-check-label" for="${fieldId}">
+                            ${displayName}
+                            ${isUnparsed ? '<span class="badge bg-warning ms-1">unparsed</span>' : ''}
+                        </label>
+                    </div>
+                `;
+                break;
+            case 'string':
+                inputHtml = `
+                    <div class="annotation-metadata-field mb-2">
+                        <label for="${fieldId}" class="form-label">
+                            ${displayName}
+                            ${isUnparsed ? '<span class="badge bg-warning ms-1">unparsed</span>' : ''}
+                        </label>
+                        <input type="text" class="form-control form-control-sm" 
+                               id="${fieldId}" value="${isUnparsed && typeof value === 'object' ? 'unparsed' : (value || '')}">
+                    </div>
+                `;
+                break;
+            case 'number':
+                inputHtml = `
+                    <div class="annotation-metadata-field mb-2">
+                        <label for="${fieldId}" class="form-label">
+                            ${displayName}
+                            ${isUnparsed ? '<span class="badge bg-warning ms-1">unparsed</span>' : ''}
+                        </label>
+                        <input type="number" class="form-control form-control-sm" 
+                               id="${fieldId}" value="${value || ''}">
+                    </div>
+                `;
+                break;
+        }
+        
+        return inputHtml;
+    }
+
+    async saveAnnotationEdit() {
+        if (!this.currentEditingAnnotation) return;
+
+        const classification = document.getElementById('editAnnotationClassification').value || null;
+        const label = document.getElementById('editAnnotationLabel').value || '';
+        
+        // Collect metadata from all fields in the form
+        const metadata = {};
+        
+        // Get the metadata fields container and all field inputs
+        const metadataContainer = document.getElementById('editAnnotationMetadata');
+        const metadataInputs = metadataContainer.querySelectorAll('input, select, textarea');
+        
+        metadataInputs.forEach(input => {
+            const fieldName = input.id.replace('edit_', '');
+            if (fieldName && input.id.startsWith('edit_')) {
+                if (input.type === 'checkbox') {
+                    metadata[fieldName] = input.checked;
+                } else if (input.type === 'number') {
+                    const numValue = parseFloat(input.value);
+                    metadata[fieldName] = isNaN(numValue) ? 0 : numValue;
+                } else {
+                    const value = input.value.trim();
+                    if (value !== '') {
+                        metadata[fieldName] = value;
+                    }
+                }
+            }
+        });
+
+
+
+        try {
+            this.showLoading(true);
+
+            const response = await fetch(`${this.apiBaseUrl}/annotations/${this.currentEditingAnnotation.id}/`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({
+                    classification: classification,
+                    label: label,
+                    metadata: metadata
+                })
+            });
+
+            if (response.ok) {
+                const updatedAnnotation = await response.json();
+                
+                // Update local annotation
+                this.currentEditingAnnotation.classification = updatedAnnotation.classification;
+                this.currentEditingAnnotation.label = updatedAnnotation.label;
+                this.currentEditingAnnotation.metadata = updatedAnnotation.metadata;
+                
+                // Update UI
+                this.updateCombinedTranscription();
+                
+                // Hide modal and show success
+                bootstrap.Modal.getInstance(document.getElementById('editAnnotationModal')).hide();
+                this.showAlert('Annotation updated successfully!', 'success');
+            } else {
+                throw new Error('Failed to update annotation');
+            }
+        } catch (error) {
+            console.error('Error updating annotation:', error);
+            this.showAlert('Failed to update annotation', 'danger');
+        } finally {
+            this.showLoading(false);
+            this.currentEditingAnnotation = null;
+        }
+    }
+
+    // Prompts Management
+    populatePromptsList() {
+        const container = document.getElementById('promptsList');
+        if (!container || !this.customPrompts) return;
+
+        container.innerHTML = '';
+
+        this.customPrompts.forEach(prompt => {
+            const promptHtml = `
+                <div class="prompt-item ${this.selectedPrompt === prompt.id ? 'active' : ''}" 
+                     data-prompt-id="${prompt.id}">
+                    <div class="prompt-item-header">
+                        <h6 class="prompt-item-title">${prompt.name}</h6>
+                        <div class="prompt-item-actions">
+                            <button class="btn btn-xs btn-outline-primary" 
+                                    onclick="app.editPrompt('${prompt.id}')" title="Edit">
+                                <i class="fas fa-edit"></i>
+                            </button>
+                            ${!prompt.is_default ? `
+                                <button class="btn btn-xs btn-outline-danger" 
+                                        onclick="app.deletePrompt('${prompt.id}')" title="Delete">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            ` : ''}
+                        </div>
+                    </div>
+                    <div class="prompt-item-preview">${prompt.prompt}</div>
+                    <div class="prompt-item-zones">
+                        ${prompt.zones.map(zone => `
+                            <span class="badge bg-secondary prompt-zone-badge">${zone}</span>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+            container.insertAdjacentHTML('beforeend', promptHtml);
+        });
+
+        // Add click handlers for prompt selection
+        container.querySelectorAll('.prompt-item').forEach(item => {
+            item.addEventListener('click', (e) => {
+                if (!e.target.closest('button')) {
+                    this.selectPrompt(item.dataset.promptId);
+                }
+            });
+        });
+    }
+
+    selectPrompt(promptId) {
+        this.selectedPrompt = promptId;
+        
+        // Update UI
+        document.querySelectorAll('.prompt-item').forEach(item => {
+            item.classList.remove('active');
+        });
+        
+        const selectedItem = document.querySelector(`[data-prompt-id="${promptId}"]`);
+        if (selectedItem) {
+            selectedItem.classList.add('active');
+        }
+    }
+
+    showAddPromptModal() {
+        this.currentEditingPrompt = null;
+        this.populatePromptModal();
+        document.getElementById('promptModalTitle').innerHTML = '<i class="fas fa-comment-dots me-2"></i>Add Prompt';
+        
+        const modal = new bootstrap.Modal(document.getElementById('promptModal'));
+        modal.show();
+    }
+
+    editPrompt(promptId) {
+        const prompt = this.customPrompts.find(p => p.id === promptId);
+        if (!prompt) return;
+
+        this.currentEditingPrompt = prompt;
+        this.populatePromptModal(prompt);
+        document.getElementById('promptModalTitle').innerHTML = '<i class="fas fa-edit me-2"></i>Edit Prompt';
+        
+        const modal = new bootstrap.Modal(document.getElementById('promptModal'));
+        modal.show();
+    }
+
+    populatePromptModal(prompt = null) {
+        // Clear form
+        document.getElementById('promptForm').reset();
+        
+        if (prompt) {
+            document.getElementById('promptName').value = prompt.name;
+            document.getElementById('promptText').value = prompt.prompt;
+        }
+
+        // Populate zone types
+        this.populatePromptZoneTypes(prompt);
+        
+        // Populate metadata fields
+        this.populatePromptMetadataFields(prompt);
+    }
+
+    populatePromptZoneTypes(prompt = null) {
+        const container = document.getElementById('promptZoneTypes');
+        container.innerHTML = '';
+
+        if (!this.annotationTypes) return;
+
+        // Add zone types
+        this.annotationTypes.all_types.zones.forEach(zoneType => {
+            const isChecked = prompt && prompt.zones && prompt.zones.includes(zoneType.value);
+            const checkboxHtml = `
+                <div class="col-md-6">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" value="${zoneType.value}" 
+                               id="prompt_zone_${zoneType.value}" ${isChecked ? 'checked' : ''}>
+                        <label class="form-check-label" for="prompt_zone_${zoneType.value}">
+                            ${zoneType.label}
+                        </label>
+                    </div>
+                </div>
+            `;
+            container.insertAdjacentHTML('beforeend', checkboxHtml);
+        });
+    }
+
+    populatePromptMetadataFields(prompt = null) {
+        const container = document.getElementById('promptMetadataFields');
+        container.innerHTML = '';
+
+        const metadataFields = prompt && prompt.metadata_fields ? prompt.metadata_fields : [
+            { name: 'handwritten', type: 'boolean', default: false },
+            { name: 'typed', type: 'boolean', default: true },
+            { name: 'language', type: 'string', default: 'en' }
+        ];
+
+        metadataFields.forEach((field, index) => {
+            this.addMetadataFieldToPrompt(field, index);
+        });
+    }
+
+    addMetadataField() {
+        const defaultField = { name: '', type: 'string', default: '' };
+        const container = document.getElementById('promptMetadataFields');
+        const index = container.children.length;
+        this.addMetadataFieldToPrompt(defaultField, index);
+    }
+
+    addMetadataFieldToPrompt(field, index) {
+        const container = document.getElementById('promptMetadataFields');
+        
+        const fieldHtml = `
+            <div class="metadata-field" data-field-index="${index}">
+                <div class="metadata-field-header">
+                    <h6 class="metadata-field-title">Metadata Field ${index + 1}</h6>
+                    <button type="button" class="btn btn-sm btn-outline-danger" 
+                            onclick="this.closest('.metadata-field').remove()">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+                <div class="metadata-field-controls">
+                    <div>
+                        <label class="form-label">Name</label>
+                        <input type="text" class="form-control form-control-sm" 
+                               name="metadata_name_${index}" value="${field.name}" required>
+                    </div>
+                    <div>
+                        <label class="form-label">Type</label>
+                        <select class="form-select form-select-sm" name="metadata_type_${index}">
+                            <option value="string" ${field.type === 'string' ? 'selected' : ''}>Text</option>
+                            <option value="boolean" ${field.type === 'boolean' ? 'selected' : ''}>Boolean</option>
+                            <option value="number" ${field.type === 'number' ? 'selected' : ''}>Number</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="form-label">Default</label>
+                        <input type="text" class="form-control form-control-sm" 
+                               name="metadata_default_${index}" value="${field.default}">
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        container.insertAdjacentHTML('beforeend', fieldHtml);
+    }
+
+    async savePrompt() {
+        const name = document.getElementById('promptName').value.trim();
+        const promptText = document.getElementById('promptText').value.trim();
+
+        if (!name || !promptText) {
+            this.showAlert('Please fill in all required fields', 'warning');
+            return;
+        }
+
+        // Collect selected zones
+        const selectedZones = [];
+        document.querySelectorAll('#promptZoneTypes input[type="checkbox"]:checked').forEach(checkbox => {
+            selectedZones.push(checkbox.value);
+        });
+
+        if (selectedZones.length === 0) {
+            this.showAlert('Please select at least one zone type', 'warning');
+            return;
+        }
+
+        // Collect metadata fields
+        const metadataFields = [];
+        document.querySelectorAll('.metadata-field').forEach(fieldElement => {
+            const index = fieldElement.dataset.fieldIndex;
+            const nameInput = fieldElement.querySelector(`input[name="metadata_name_${index}"]`);
+            const typeSelect = fieldElement.querySelector(`select[name="metadata_type_${index}"]`);
+            const defaultInput = fieldElement.querySelector(`input[name="metadata_default_${index}"]`);
+
+            if (nameInput && nameInput.value.trim()) {
+                let defaultValue = defaultInput.value;
+                if (typeSelect.value === 'boolean') {
+                    defaultValue = defaultValue.toLowerCase() === 'true';
+                } else if (typeSelect.value === 'number') {
+                    defaultValue = parseFloat(defaultValue) || 0;
+                }
+
+                metadataFields.push({
+                    name: nameInput.value.trim(),
+                    type: typeSelect.value,
+                    default: defaultValue
+                });
+            }
+        });
+
+        const promptData = {
+            id: this.currentEditingPrompt ? this.currentEditingPrompt.id : 'prompt_' + Date.now(),
+            name: name,
+            prompt: promptText,
+            zones: selectedZones,
+            metadata_fields: metadataFields,
+            is_default: false
+        };
+
+        try {
+            this.showLoading(true);
+
+            let updatedPrompts;
+            if (this.currentEditingPrompt) {
+                // Update existing prompt
+                const index = this.customPrompts.findIndex(p => p.id === this.currentEditingPrompt.id);
+                if (index !== -1) {
+                    this.customPrompts[index] = promptData;
+                }
+                updatedPrompts = this.customPrompts;
+            } else {
+                // Add new prompt
+                updatedPrompts = [...this.customPrompts, promptData];
+            }
+
+            // Save to backend
+            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({
+                    custom_prompts: updatedPrompts
+                })
+            });
+
+            if (response.ok) {
+                this.customPrompts = updatedPrompts;
+                this.populatePromptsList();
+                
+                bootstrap.Modal.getInstance(document.getElementById('promptModal')).hide();
+                this.showAlert('Prompt saved successfully!', 'success');
+            } else {
+                throw new Error('Failed to save prompt');
+            }
+        } catch (error) {
+            console.error('Error saving prompt:', error);
+            this.showAlert('Failed to save prompt', 'danger');
+        } finally {
+            this.showLoading(false);
+            this.currentEditingPrompt = null;
+        }
+    }
+
+    async deletePrompt(promptId) {
+        const prompt = this.customPrompts.find(p => p.id === promptId);
+        if (!prompt || prompt.is_default) return;
+
+        if (!confirm(`Are you sure you want to delete the prompt "${prompt.name}"?`)) return;
+
+        try {
+            this.showLoading(true);
+
+            const updatedPrompts = this.customPrompts.filter(p => p.id !== promptId);
+
+            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({
+                    custom_prompts: updatedPrompts
+                })
+            });
+
+            if (response.ok) {
+                this.customPrompts = updatedPrompts;
+                this.populatePromptsList();
+                this.showAlert('Prompt deleted successfully!', 'success');
+            } else {
+                throw new Error('Failed to delete prompt');
+            }
+        } catch (error) {
+            console.error('Error deleting prompt:', error);
+            this.showAlert('Failed to delete prompt', 'danger');
+        } finally {
+            this.showLoading(false);
+        }
+    }
+
+    // Project and Document Creation
+    showCreateProjectModal() {
+        const modal = new bootstrap.Modal(document.getElementById('createProjectModal'));
+        modal.show();
+    }
+
+    async createProject() {
+        const name = document.getElementById('projectName').value;
+        const description = document.getElementById('projectDescription').value;
+
+        if (!name.trim()) {
+            this.showAlert('Project name is required', 'warning');
+            return;
+        }
+
+        try {
+            this.showLoading(true);
+            
+            const response = await fetch(`${this.apiBaseUrl}/projects/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({ name, description })
+            });
+
+            if (response.ok) {
+                const project = await response.json();
+                bootstrap.Modal.getInstance(document.getElementById('createProjectModal')).hide();
+                document.getElementById('createProjectForm').reset();
+                await this.loadProjects();
+                this.showAlert('Project created successfully!', 'success');
+            } else {
+                const error = await response.json();
+                this.showAlert(error.error || 'Failed to create project', 'danger');
+            }
+        } catch (error) {
+            console.error('Create project error:', error);
+            this.showAlert('Failed to create project', 'danger');
+        } finally {
+            this.showLoading(false);
+        }
+    }
+
+    showCreateDocumentModal(projectId) {
+        this.selectedProjectId = projectId;
+        const modal = new bootstrap.Modal(document.getElementById('createDocumentModal'));
+        
+        // Clear form and set the project context in the modal
+        document.getElementById('createDocumentForm').reset();
+        const modalTitle = document.querySelector('#createDocumentModal .modal-title');
+        
+        // Find project name for better UX
+        const projectItem = document.querySelector(`[data-project-id="${projectId}"]`);
+        const projectName = projectItem ? projectItem.querySelector('.tree-text').textContent : 'Unknown Project';
+        modalTitle.innerHTML = `<i class="fas fa-file-plus me-2"></i>Create Document in "${projectName}"`;
+        
+        modal.show();
+    }
+
+    async createDocument() {
+        const name = document.getElementById('documentName').value;
+        const description = document.getElementById('documentDescription').value;
+        const readingOrder = document.getElementById('documentReadingOrder').value;
+
+        if (!name.trim()) {
+            this.showAlert('Document name is required', 'warning');
+            return;
+        }
+
+        if (!this.selectedProjectId) {
+            this.showAlert('No project selected', 'warning');
+            return;
+        }
+
+        console.log('Creating document in project:', this.selectedProjectId); // Debug log
+
+        try {
+            this.showLoading(true);
+            
+            const requestData = { 
+                name, 
+                description, 
+                project_id: this.selectedProjectId 
+            };
+            
+            if (readingOrder) {
+                requestData.reading_order = readingOrder;
+            }
+
+            const response = await fetch(`${this.apiBaseUrl}/documents/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify(requestData)
+            });
+
+            if (response.ok) {
+                const newDocument = await response.json();
+                bootstrap.Modal.getInstance(document.getElementById('createDocumentModal')).hide();
+                document.getElementById('createDocumentForm').reset();
+                
+                // Refresh the project tree to show the new document
+                const projectContainer = document.querySelector(`[data-project-id="${this.selectedProjectId}"] .tree-children`);
+                if (projectContainer && projectContainer.style.display !== 'none') {
+                    projectContainer.innerHTML = ''; // Clear existing content
+                    await this.loadProjectDocuments(this.selectedProjectId, projectContainer);
+                }
+                
+                this.showAlert('Document created successfully!', 'success');
+            } else {
+                const error = await response.json();
+                this.showAlert(error.error || 'Failed to create document', 'danger');
+            }
+        } catch (error) {
+            console.error('Create document error:', error);
+            this.showAlert('Failed to create document', 'danger');
+        } finally {
+            this.showLoading(false);
+        }
+    }
+
+    showUploadImageModal(documentId) {
+        this.selectedDocumentId = documentId;
+        const modal = new bootstrap.Modal(document.getElementById('uploadImageModal'));
+        
+        // Clear form and reset progress
+        document.getElementById('uploadImageForm').reset();
+        document.getElementById('uploadProgress').style.display = 'none';
+        
+        // Set context in modal title
+        const modalTitle = document.querySelector('#uploadImageModal .modal-title');
+        const documentItem = document.querySelector(`[data-document-id="${documentId}"]`);
+        const documentName = documentItem ? documentItem.querySelector('.tree-text').textContent : 'Unknown Document';
+        modalTitle.innerHTML = `<i class="fas fa-image me-2"></i>Upload Images to "${documentName}"`;
+        
+        modal.show();
+    }
+
+    async uploadImages() {
+        const fileInput = document.getElementById('imageFiles');
+        const autoTranscribe = document.getElementById('autoTranscribe').checked;
+        
+        if (!fileInput.files.length) {
+            this.showAlert('Please select at least one image', 'warning');
+            return;
+        }
+
+        if (!this.selectedDocumentId) {
+            this.showAlert('No document selected', 'warning');
+            return;
+        }
+
+        const progressContainer = document.getElementById('uploadProgress');
+        const progressBar = progressContainer.querySelector('.progress-bar');
+        const statusDiv = document.getElementById('uploadStatus');
+        
+        progressContainer.style.display = 'block';
+        
+        const files = Array.from(fileInput.files);
+        let uploaded = 0;
+
+                 try {
+             for (let i = 0; i < files.length; i++) {
+                 const file = files[i];
+                 statusDiv.textContent = `Uploading ${file.name}...`;
+                 
+                 // Create FormData with image file and metadata
+                 const formData = new FormData();
+                 formData.append('image_file', file);
+                 formData.append('name', file.name.split('.')[0]); // Remove extension for name
+                 formData.append('document_id', this.selectedDocumentId);
+                 if (i !== undefined) {
+                     formData.append('order', i.toString());
+                 }
+
+                 const uploadResponse = await fetch(`${this.apiBaseUrl}/images/`, {
+                     method: 'POST',
+                     headers: {
+                         'Authorization': `Token ${this.authToken}`
+                     },
+                     body: formData
+                 });
+
+                 if (uploadResponse.ok) {
+                     const imageRecord = await uploadResponse.json();
+                     uploaded++;
+                     const progress = (uploaded / files.length) * 100;
+                     progressBar.style.width = `${progress}%`;
+                     
+                     // Auto-transcribe if requested
+                     if (autoTranscribe) {
+                         statusDiv.textContent = `Transcribing ${file.name}...`;
+                         await this.transcribeImageById(imageRecord.id);
+                     }
+                 } else {
+                     const error = await uploadResponse.json();
+                     console.error(`Failed to upload ${file.name}:`, error);
+                     this.showAlert(`Failed to upload ${file.name}: ${JSON.stringify(error)}`, 'danger');
+                 }
+             }
+
+            statusDiv.textContent = `Uploaded ${uploaded} of ${files.length} images`;
+            
+            // Refresh the document tree to show new images
+            const documentContainer = document.querySelector(`[data-document-id="${this.selectedDocumentId}"] .tree-children`);
+            if (documentContainer && documentContainer.style.display !== 'none') {
+                documentContainer.innerHTML = '';
+                await this.loadDocumentImages(this.selectedDocumentId, documentContainer);
+            }
+
+            setTimeout(() => {
+                bootstrap.Modal.getInstance(document.getElementById('uploadImageModal')).hide();
+                this.showAlert(`Successfully uploaded ${uploaded} images!`, 'success');
+            }, 1000);
+
+        } catch (error) {
+            console.error('Upload error:', error);
+            this.showAlert('Upload failed', 'danger');
+        }
+    }
+
+    async selectImage(imageId) {
+        try {
+            // Update active state
+            document.querySelectorAll('.image-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            document.querySelector(`[data-image-id="${imageId}"]`).classList.add('active');
+
+            // Clear previous image data
+            this.clearImageData();
+
+            // Load image details
+            const response = await fetch(`${this.apiBaseUrl}/images/${imageId}/`, {
+                headers: {
+                    'Authorization': `Token ${this.authToken}`
+                }
+            });
+
+            if (response.ok) {
+                this.currentImage = await response.json();
+                await this.loadImageInCanvas();
+                await this.loadImageAnnotations();
+                await this.loadImageTranscriptions();
+                
+                // Refresh annotation positions after image and transform are set
+                this.refreshAnnotationPositions();
+                
+                // Show image viewer
+                document.getElementById('defaultView').style.display = 'none';
+                document.getElementById('imageViewer').style.display = 'block';
+            }
+        } catch (error) {
+            console.error('Error selecting image:', error);
+            this.showAlert('Failed to load image', 'danger');
+        }
+    }
+
+    clearImageData() {
+        // Clear canvas
+        if (this.canvas) {
+            this.canvas.clear();
+        }
+        
+        // Clear annotations
+        this.annotations = [];
+        this.selectedAnnotations = [];
+        
+        // Clear transcription display
+        const transcriptionContent = document.getElementById('transcriptionContent');
+        transcriptionContent.innerHTML = '<p class="text-muted">Select an image to view transcription</p>';
+        
+        // Reset current references
+        this.currentFabricImage = null;
+        this.originalImageScale = null;
+        this.currentImageTranscription = null;
+        this.imageTransform = null;
+    }
+
+    // Transform coordinates from original image space to canvas space
+    transformToCanvas(originalCoords, type) {
+        if (!this.imageTransform) return originalCoords;
+        
+        const { scale, left, top } = this.imageTransform;
+        
+        if (type === 'bbox') {
+            return {
+                x: originalCoords.x * scale + left,
+                y: originalCoords.y * scale + top,
+                width: originalCoords.width * scale,
+                height: originalCoords.height * scale
+            };
+        } else if (type === 'polygon') {
+            return {
+                points: originalCoords.points.map(point => ({
+                    x: point.x * scale + left,
+                    y: point.y * scale + top
+                }))
+            };
+        }
+        return originalCoords;
+    }
+
+    // Transform coordinates from canvas space to original image space
+    transformToOriginal(canvasCoords, type) {
+        if (!this.imageTransform) return canvasCoords;
+        
+        const { scale, left, top } = this.imageTransform;
+        
+        if (type === 'bbox') {
+            return {
+                x: (canvasCoords.x - left) / scale,
+                y: (canvasCoords.y - top) / scale,
+                width: canvasCoords.width / scale,
+                height: canvasCoords.height / scale
+            };
+        } else if (type === 'polygon') {
+            return {
+                points: canvasCoords.points.map(point => ({
+                    x: (point.x - left) / scale,
+                    y: (point.y - top) / scale
+                }))
+            };
+        }
+        return canvasCoords;
+    }
+
+    // Refresh annotation positions after image transform changes
+    refreshAnnotationPositions() {
+        if (!this.annotations || !this.imageTransform) return;
+        
+        this.annotations.forEach(annotation => {
+            if (annotation.fabricObject) {
+                const transformedCoords = this.transformToCanvas(annotation.coordinates, annotation.type);
+                
+                if (annotation.type === 'bbox') {
+                    annotation.fabricObject.set({
+                        left: transformedCoords.x,
+                        top: transformedCoords.y,
+                        width: transformedCoords.width,
+                        height: transformedCoords.height
+                    });
+                } else if (annotation.type === 'polygon') {
+                    annotation.fabricObject.set({
+                        points: transformedCoords.points
+                    });
+                }
+            }
+        });
+        
+        this.canvas.renderAll();
+    }
+
+    async loadImageInCanvas() {
+        if (!this.currentImage || !this.canvas) return;
+
+        try {
+            const imgElement = new Image();
+            imgElement.crossOrigin = 'anonymous';
+            
+            imgElement.onload = () => {
+                // Clear canvas
+                this.canvas.clear();
+                
+                // Get container dimensions
+                const container = document.querySelector('.canvas-container');
+                const maxContainerWidth = container.clientWidth - 40;
+                const maxContainerHeight = container.clientHeight - 40;
+                
+                // Determine optimal canvas size based on image dimensions
+                const imgWidth = imgElement.width;
+                const imgHeight = imgElement.height;
+                
+                // For high-resolution images, allow them to display at full size up to container limits
+                let canvasWidth = Math.min(imgWidth, maxContainerWidth, 2000); // Max 2000px wide
+                let canvasHeight = Math.min(imgHeight, maxContainerHeight, 1500); // Max 1500px tall
+                
+                // Ensure minimum canvas size
+                canvasWidth = Math.max(canvasWidth, 800);
+                canvasHeight = Math.max(canvasHeight, 600);
+                
+                // Resize canvas to accommodate the image better
+                this.canvas.setDimensions({
+                    width: canvasWidth,
+                    height: canvasHeight
+                });
+                
+                // Create fabric image
+                const fabricImg = new fabric.Image(imgElement, {
+                    left: 0,
+                    top: 0,
+                    selectable: false,
+                    evented: false
+                });
+
+                // Calculate scale - prefer showing image at full resolution when possible
+                const scaleX = canvasWidth / imgWidth;
+                const scaleY = canvasHeight / imgHeight;
+                let scale = Math.min(scaleX, scaleY, 1); // Don't scale up, only down if necessary
+                
+                // For small images, allow some scaling up (up to 2x)
+                if (scale === 1 && imgWidth < 400 && imgHeight < 400) {
+                    scale = Math.min(2, Math.min(canvasWidth / imgWidth, canvasHeight / imgHeight));
+                }
+
+                fabricImg.scale(scale);
+                
+                // Center the image
+                const scaledWidth = imgWidth * scale;
+                const scaledHeight = imgHeight * scale;
+                fabricImg.set({
+                    left: (canvasWidth - scaledWidth) / 2,
+                    top: (canvasHeight - scaledHeight) / 2
+                });
+
+                this.canvas.add(fabricImg);
+                this.canvas.sendToBack(fabricImg);
+                this.canvas.renderAll();
+                
+                // Store image reference and transformation info for annotations
+                this.currentFabricImage = fabricImg;
+                this.originalImageScale = scale;
+                this.imageTransform = {
+                    scale: scale,
+                    left: fabricImg.left,
+                    top: fabricImg.top,
+                    originalWidth: imgWidth,
+                    originalHeight: imgHeight
+                };
+            };
+
+            imgElement.src = this.currentImage.image_file;
+        } catch (error) {
+            console.error('Error loading image in canvas:', error);
+        }
+    }
+
+    async loadImageAnnotations() {
+        if (!this.currentImage) return;
+
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/images/${this.currentImage.id}/annotations/`, {
+                headers: {
+                    'Authorization': `Token ${this.authToken}`
+                }
+            });
+
+            if (response.ok) {
+                const annotations = await response.json();
+                this.renderAnnotationsOnCanvas(annotations);
+            }
+        } catch (error) {
+            console.error('Error loading annotations:', error);
+        }
+    }
+
+    renderAnnotationsOnCanvas(annotations) {
+        // Clear existing annotations
+        this.annotations = [];
+        
+        annotations.forEach(annotation => {
+            let fabricObject;
+            
+            // Transform coordinates from original image space to canvas space
+            const transformedCoords = this.transformToCanvas(annotation.coordinates, annotation.annotation_type);
+            
+            // Get color for annotation classification
+            const color = annotation.classification ? (this.zoneColors[annotation.classification] || '#0066cc') : '#0066cc';
+            const fillColor = this.hexToRgba(color, 0.1);
+            
+            if (annotation.annotation_type === 'bbox') {
+                fabricObject = new fabric.Rect({
+                    left: transformedCoords.x,
+                    top: transformedCoords.y,
+                    width: transformedCoords.width,
+                    height: transformedCoords.height,
+                    fill: fillColor,
+                    stroke: color,
+                    strokeWidth: 2,
+                    selectable: true,
+                    lockUniScaling: false, // Allow free resizing
+                    lockScalingFlip: false, // Allow negative scaling
+                    uniformScaling: false, // Disable aspect ratio locking
+                    uniScaleTransform: false, // Additional property to disable uniform scaling
+                    centeredScaling: false, // Disable centered scaling
+                    hasRotatingPoint: false, // Disable rotation
+                    cornerStyle: 'rect', // Square corners for better UX
+                    cornerSize: 8,
+                    transparentCorners: false,
+                    cornerColor: color,
+                    lockMovementX: false,
+                    lockMovementY: false
+                });
+            } else if (annotation.annotation_type === 'polygon') {
+                fabricObject = new fabric.Polygon(transformedCoords.points, {
+                    fill: fillColor,
+                    stroke: color,
+                    strokeWidth: 2,
+                    selectable: true,
+                    hasRotatingPoint: false, // Disable rotation
+                    cornerStyle: 'circle', // Circle corners for polygons
+                    cornerSize: 6,
+                    transparentCorners: false,
+                    cornerColor: color
+                });
+            }
+
+            if (fabricObject) {
+                fabricObject.annotationId = annotation.id;
+                this.canvas.add(fabricObject);
+                
+                this.annotations.push({
+                    id: annotation.id,
+                    type: annotation.annotation_type,
+                    fabricObject: fabricObject,
+                    coordinates: annotation.coordinates, // Store original coordinates
+                    classification: annotation.classification,
+                    label: annotation.label,
+                    reading_order: annotation.reading_order,
+                    metadata: annotation.metadata || {},
+                    transcription: null
+                });
+            }
+        });
+
+        this.updateAnnotationsList();
+        this.canvas.renderAll();
+    }
+
+    async loadImageTranscriptions() {
+        if (!this.currentImage) return;
+
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/transcriptions/?image=${this.currentImage.id}`, {
+                headers: {
+                    'Authorization': `Token ${this.authToken}`
+                }
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                const transcriptions = data.results;
+                
+                // Find the latest full image transcription
+                const imageTranscription = transcriptions.find(t => 
+                    t.transcription_type === 'full_image' && t.is_current
+                );
+                
+                // Store current image transcription
+                this.currentImageTranscription = imageTranscription;
+
+                // Update annotation transcriptions
+                transcriptions.forEach(transcription => {
+                    if (transcription.transcription_type === 'annotation' && transcription.is_current) {
+                        this.updateAnnotationTranscription(transcription.annotation.id, transcription);
+                    }
+                });
+
+                // Update the combined transcription display
+                this.updateCombinedTranscription();
+            }
+        } catch (error) {
+            console.error('Error loading transcriptions:', error);
+        }
+    }
+
+    async transcribeImageById(imageId) {
+        const credentials = this.getStoredCredentials();
+        if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+            return;
+        }
+
+        try {
+            const requestData = {
+                transcription_type: 'full_image',
+                api_endpoint: credentials.openai_api_key ? 'openai' : credentials.custom_endpoint_url,
+                api_model: 'gpt-4o-mini'
+            };
+
+            if (credentials.openai_api_key) {
+                requestData.openai_api_key = credentials.openai_api_key;
+            } else {
+                requestData.custom_endpoint_auth = credentials.custom_endpoint_auth;
+            }
+
+            await fetch(`${this.apiBaseUrl}/images/${imageId}/transcribe/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify(requestData)
+            });
+        } catch (error) {
+            console.error('Auto-transcription error:', error);
+        }
+    }
+
+    // Panel Management Methods
+    toggleLeftPanel() {
+        const leftSidebar = document.getElementById('leftSidebar');
+        const leftIcon = document.getElementById('leftPanelIcon');
+        const leftResizeHandle = document.getElementById('leftResizeHandle');
+        const isCollapsed = leftSidebar.classList.contains('collapsed');
+
+        if (isCollapsed) {
+            leftSidebar.classList.remove('collapsed');
+            leftSidebar.style.width = this.leftPanelWidth || '25%';
+            leftIcon.className = 'fas fa-chevron-left';
+            if (leftResizeHandle) leftResizeHandle.style.display = 'block';
+        } else {
+            // Store current width before collapsing
+            this.leftPanelWidth = leftSidebar.style.width || '25%';
+            leftSidebar.classList.add('collapsed');
+            leftSidebar.style.width = '0';
+            leftIcon.className = 'fas fa-chevron-right';
+            if (leftResizeHandle) leftResizeHandle.style.display = 'none';
+        }
+        
+        // Delay canvas resize to allow for smooth transition
+        setTimeout(() => {
+            this.resizeCanvas();
+        }, 300);
+    }
+
+    toggleRightPanel() {
+        const rightPanel = document.getElementById('transcriptionPanel');
+        const rightIcon = document.getElementById('rightPanelIcon');
+        const rightResizeHandle = document.getElementById('rightResizeHandle');
+        const isCollapsed = rightPanel.classList.contains('collapsed');
+
+        if (isCollapsed) {
+            rightPanel.classList.remove('collapsed');
+            rightPanel.style.width = this.rightPanelWidth || '800px';
+            rightIcon.className = 'fas fa-chevron-right';
+            if (rightResizeHandle) rightResizeHandle.style.display = 'block';
+        } else {
+            // Store current width before collapsing
+            this.rightPanelWidth = rightPanel.style.width || '800px';
+            rightPanel.classList.add('collapsed');
+            rightPanel.style.width = '0';
+            rightIcon.className = 'fas fa-chevron-left';
+            if (rightResizeHandle) rightResizeHandle.style.display = 'none';
+        }
+        
+        // Delay canvas resize to allow for smooth transition
+        setTimeout(() => {
+            this.resizeCanvas();
+        }, 300);
+    }
+
+    // Transcribe All Regions
+    transcribeAllRegions() {
+        if (!this.annotations || this.annotations.length === 0) {
+            this.showAlert('No annotations found. Please add some regions first.', 'warning');
+            return;
+        }
+
+        // Check if any annotations already have transcriptions
+        const existingTranscriptions = this.annotations.filter(a => a.transcription && a.transcription.text_content);
+        
+        // Update region count in modal
+        document.getElementById('regionCount').textContent = this.annotations.length;
+        
+        if (existingTranscriptions.length > 0) {
+            // Show warning modal
+            const modal = new bootstrap.Modal(document.getElementById('transcribeAllModal'));
+            modal.show();
+        } else {
+            // No existing transcriptions, proceed directly
+            this.confirmTranscribeAllRegions();
+        }
+    }
+
+    async confirmTranscribeAllRegions() {
+        try {
+            // Hide the modal if it's open
+            const modalElement = document.getElementById('transcribeAllModal');
+            const modal = bootstrap.Modal.getInstance(modalElement);
+            if (modal) {
+                modal.hide();
+            }
+
+            const credentials = this.getStoredCredentials();
+            if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+                this.showCredentialsModal();
+                return;
+            }
+
+            let successCount = 0;
+            let errorCount = 0;
+
+            this.showAlert(`Starting transcription of ${this.annotations.length} regions...`, 'info');
+
+            // Transcribe all annotations with individual progress indicators
+            for (const annotation of this.annotations) {
+                try {
+                    this.showAnnotationProgress(annotation.id, true);
+                    await this.transcribeAnnotation(annotation.id, credentials);
+                    this.showAnnotationProgress(annotation.id, false);
+                    successCount++;
+                } catch (error) {
+                    console.error(`Failed to transcribe annotation ${annotation.id}:`, error);
+                    this.showAnnotationProgress(annotation.id, false);
+                    errorCount++;
+                }
+            }
+
+            // Reload transcriptions to get updated data
+            await this.loadImageTranscriptions();
+
+            if (errorCount === 0) {
+                this.showAlert(`Successfully transcribed all ${successCount} regions!`, 'success');
+            } else {
+                this.showAlert(`Transcribed ${successCount} regions. ${errorCount} failed.`, 'warning');
+            }
+
+        } catch (error) {
+            console.error('Transcribe all regions error:', error);
+            this.showAlert('Failed to transcribe regions. Please try again.', 'danger');
+        }
+    }
+
+    // Panel Resize Functionality
+    initPanelResize() {
+        const leftResizeHandle = document.getElementById('leftResizeHandle');
+        const rightResizeHandle = document.getElementById('rightResizeHandle');
+        
+        if (leftResizeHandle) {
+            this.setupResizeHandle(leftResizeHandle, 'left');
+        }
+        
+        if (rightResizeHandle) {
+            this.setupResizeHandle(rightResizeHandle, 'right');
+        }
+    }
+
+    setupResizeHandle(handle, side) {
+        let isResizing = false;
+        let startX = 0;
+        let startWidth = 0;
+        let animationId = null;
+        let lastMouseX = 0;
+
+        const updatePanelSize = () => {
+            if (!isResizing) return;
+
+            const diff = lastMouseX - startX;
+            let newWidth;
+
+            if (side === 'left') {
+                newWidth = startWidth + diff;
+                const minWidth = 200;
+                const maxWidth = window.innerWidth * 0.4;
+                
+                newWidth = Math.max(minWidth, Math.min(newWidth, maxWidth));
+                
+                const leftSidebar = document.getElementById('leftSidebar');
+                leftSidebar.style.width = newWidth + 'px';
+            } else {
+                newWidth = startWidth - diff;
+                const minWidth = 300;
+                const maxWidth = window.innerWidth * 0.6;
+                
+                newWidth = Math.max(minWidth, Math.min(newWidth, maxWidth));
+                
+                const rightPanel = document.getElementById('transcriptionPanel');
+                rightPanel.style.width = newWidth + 'px';
+            }
+
+            // Use throttled canvas resize for better performance
+            this.throttledResizeCanvas();
+        };
+
+        handle.addEventListener('mousedown', (e) => {
+            isResizing = true;
+            startX = e.clientX;
+            lastMouseX = e.clientX;
+            
+            const panel = side === 'left' ? 
+                document.getElementById('leftSidebar') : 
+                document.getElementById('transcriptionPanel');
+            
+            startWidth = parseInt(window.getComputedStyle(panel).width, 10);
+            
+            document.body.classList.add('resizing');
+            document.body.classList.add('no-select');
+            
+            // Start animation loop
+            const animate = () => {
+                if (isResizing) {
+                    updatePanelSize();
+                    animationId = requestAnimationFrame(animate);
+                }
+            };
+            animationId = requestAnimationFrame(animate);
+            
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isResizing) return;
+            lastMouseX = e.clientX;
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isResizing) {
+                isResizing = false;
+                document.body.classList.remove('resizing');
+                document.body.classList.remove('no-select');
+                
+                if (animationId) {
+                    cancelAnimationFrame(animationId);
+                    animationId = null;
+                }
+                
+                // Final canvas resize
+                this.resizeCanvas();
+            }
+        });
+    }
+
+    // Canvas Tools
+    zoomIn() {
+        if (this.canvas) {
+            const currentZoom = this.canvas.getZoom();
+            const newZoom = Math.min(currentZoom * 1.2, 5); // Max 5x zoom
+            this.canvas.setZoom(newZoom);
+            this.canvas.renderAll();
+        }
+    }
+
+    zoomOut() {
+        if (this.canvas) {
+            const currentZoom = this.canvas.getZoom();
+            const newZoom = Math.max(currentZoom * 0.8, 0.1); // Min 0.1x zoom
+            this.canvas.setZoom(newZoom);
+            this.canvas.renderAll();
+        }
+    }
+
+    resetZoom() {
+        if (this.canvas) {
+            this.canvas.setZoom(1);
+            this.canvas.absolutePan({ x: 0, y: 0 });
+            this.canvas.renderAll();
+        }
+    }
+
+    // Add a fit-to-screen zoom function
+    fitToScreen() {
+        if (this.canvas && this.currentFabricImage) {
+            const canvasWidth = this.canvas.getWidth();
+            const canvasHeight = this.canvas.getHeight();
+            const imgWidth = this.currentFabricImage.width * this.currentFabricImage.scaleX;
+            const imgHeight = this.currentFabricImage.height * this.currentFabricImage.scaleY;
+            
+            const scaleX = canvasWidth / imgWidth;
+            const scaleY = canvasHeight / imgHeight;
+            const zoom = Math.min(scaleX, scaleY, 1);
+            
+            this.canvas.setZoom(zoom);
+            this.canvas.absolutePan({ x: 0, y: 0 });
+            this.canvas.renderAll();
+        }
+    }
+
+    // Keyboard Shortcuts
+    async handleKeyboard(event) {
+        if (event.target.tagName === 'INPUT' || event.target.tagName === 'TEXTAREA') {
+            return;
+        }
+
+        switch (event.key) {
+            case 'Escape':
+                if (this.currentTool === 'polygon' && this.currentPolygon) {
+                    await this.finishPolygon();
+                }
+                break;
+            case 'Delete':
+                await this.deleteSelectedAnnotations();
+                break;
+            case '1':
+                this.setTool('select');
+                break;
+            case '2':
+                this.setTool('bbox');
+                break;
+            case '3':
+                this.setTool('polygon');
+                break;
+        }
+    }
+
+    async deleteSelectedAnnotations() {
+        if (this.canvas && this.canvas.getActiveObjects().length > 0) {
+            const objectsToDelete = this.canvas.getActiveObjects();
+            
+            for (const obj of objectsToDelete) {
+                if (obj.annotationId) {
+                    // Delete from database if it's not a temp annotation
+                    if (!obj.annotationId.startsWith('temp_')) {
+                        try {
+                            await fetch(`${this.apiBaseUrl}/annotations/${obj.annotationId}/`, {
+                                method: 'DELETE',
+                                headers: {
+                                    'Authorization': `Token ${this.authToken}`
+                                }
+                            });
+                        } catch (error) {
+                            console.error('Error deleting annotation from database:', error);
+                        }
+                    }
+                    
+                    // Remove from local annotations array
+                    this.annotations = this.annotations.filter(a => a.id !== obj.annotationId);
+                }
+                
+                // Remove from canvas
+                this.canvas.remove(obj);
+            }
+            
+            this.canvas.discardActiveObject();
+            this.updateAnnotationsList();
+        }
+    }
+
+    // IIIF Import Methods
+    showIIIFImportModal() {
+        const modalElement = document.getElementById('iiifImportModal');
+        const modal = new bootstrap.Modal(modalElement);
+        
+        // Reset form when modal is closed
+        modalElement.addEventListener('hidden.bs.modal', () => {
+            document.getElementById('iiifManifestUrl').value = '';
+            document.getElementById('iiifMaxWidth').value = '1000';
+            document.getElementById('iiifImportProgress').style.display = 'none';
+        }, { once: true });
+        
+        modal.show();
+    }
+
+    setExampleManifest(url) {
+        document.getElementById('iiifManifestUrl').value = url;
+    }
+
+    async importIIIFManifest() {
+        const manifestUrl = document.getElementById('iiifManifestUrl').value.trim();
+        const maxWidth = document.getElementById('iiifMaxWidth').value;
+        
+        if (!manifestUrl) {
+            this.showAlert('Please enter a manifest URL', 'warning');
+            return;
+        }
+
+        const progressDiv = document.getElementById('iiifImportProgress');
+        const statusDiv = document.getElementById('iiifImportStatus');
+        
+        try {
+            progressDiv.style.display = 'block';
+            statusDiv.textContent = 'Fetching manifest...';
+            
+            const response = await fetch(`${this.apiBaseUrl}/iiif/import/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({ 
+                    manifest_url: manifestUrl,
+                    max_width: maxWidth
+                })
+            });
+
+            if (response.ok) {
+                const result = await response.json();
+                statusDiv.textContent = `Success! Created project "${result.project.name}" with ${result.images_created} images.`;
+                
+                // Close modal after 2 seconds and refresh projects
+                setTimeout(() => {
+                    const modal = bootstrap.Modal.getInstance(document.getElementById('iiifImportModal'));
+                    modal.hide();
+                    this.loadProjects();
+                    progressDiv.style.display = 'none';
+                    document.getElementById('iiifManifestUrl').value = '';
+                    document.getElementById('iiifMaxWidth').value = '1000';
+                }, 2000);
+                
+                this.showAlert(result.message, 'success');
+            } else {
+                const error = await response.json();
+                statusDiv.textContent = `Error: ${error.error}`;
+                this.showAlert(error.error || 'Import failed', 'danger');
+            }
+        } catch (error) {
+            console.error('IIIF import error:', error);
+            statusDiv.textContent = `Error: ${error.message}`;
+            this.showAlert('Import failed', 'danger');
+        }
+    }
+
+    // Bulk Selection Methods
+    toggleBulkSelect() {
+        this.bulkSelectMode = !this.bulkSelectMode;
+        this.selectedItems = new Set();
+        
+        const bulkSelectBtn = document.getElementById('bulkSelectBtn');
+        const bulkActionsBar = document.getElementById('bulkActionsBar');
+        const projectTree = document.getElementById('projectTree');
+        
+        if (this.bulkSelectMode) {
+            bulkSelectBtn.classList.remove('btn-outline-danger');
+            bulkSelectBtn.classList.add('btn-danger');
+            bulkSelectBtn.innerHTML = '<i class="fas fa-times"></i>';
+            bulkActionsBar.style.display = 'block';
+            projectTree.classList.add('bulk-select-mode');
+            
+            // Add checkboxes to all items
+            this.addBulkSelectCheckboxes();
+        } else {
+            bulkSelectBtn.classList.remove('btn-danger');
+            bulkSelectBtn.classList.add('btn-outline-danger');
+            bulkSelectBtn.innerHTML = '<i class="fas fa-check-square"></i>';
+            bulkActionsBar.style.display = 'none';
+            projectTree.classList.remove('bulk-select-mode');
+            
+            // Remove checkboxes
+            this.removeBulkSelectCheckboxes();
+        }
+        
+        this.updateSelectedCount();
+    }
+
+    addBulkSelectCheckboxes() {
+        const treeItems = document.querySelectorAll('.tree-item');
+        treeItems.forEach(item => {
+            if (item.dataset.projectId || item.dataset.documentId || item.dataset.imageId) {
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.className = 'form-check-input bulk-select-checkbox';
+                checkbox.addEventListener('change', (e) => {
+                    e.stopPropagation();
+                    this.handleBulkSelect(item, checkbox.checked);
+                });
+                
+                const content = item.querySelector('.tree-item-content');
+                content.style.position = 'relative';
+                content.appendChild(checkbox);
+                
+                item.classList.add('bulk-selectable');
+            }
+        });
+    }
+
+    removeBulkSelectCheckboxes() {
+        const checkboxes = document.querySelectorAll('.bulk-select-checkbox');
+        checkboxes.forEach(checkbox => checkbox.remove());
+        
+        const treeItems = document.querySelectorAll('.tree-item');
+        treeItems.forEach(item => {
+            item.classList.remove('bulk-selectable', 'bulk-selected');
+        });
+    }
+
+    handleBulkSelect(item, selected) {
+        const itemId = item.dataset.projectId || item.dataset.documentId || item.dataset.imageId;
+        const itemType = item.dataset.projectId ? 'project' : 
+                        (item.dataset.documentId ? 'document' : 'image');
+        
+        if (selected) {
+            this.selectedItems.add({ id: itemId, type: itemType, element: item });
+            item.classList.add('bulk-selected');
+        } else {
+            this.selectedItems = new Set([...this.selectedItems].filter(i => i.id !== itemId));
+            item.classList.remove('bulk-selected');
+        }
+        
+        this.updateSelectedCount();
+    }
+
+    updateSelectedCount() {
+        const count = this.selectedItems.size;
+        document.getElementById('selectedCount').textContent = `${count} selected`;
+    }
+
+    clearSelection() {
+        this.selectedItems.clear();
+        const checkboxes = document.querySelectorAll('.bulk-select-checkbox');
+        checkboxes.forEach(checkbox => checkbox.checked = false);
+        
+        const selectedItems = document.querySelectorAll('.bulk-selected');
+        selectedItems.forEach(item => item.classList.remove('bulk-selected'));
+        
+        this.updateSelectedCount();
+    }
+
+    bulkDeleteSelected() {
+        if (this.selectedItems.size === 0) {
+            this.showAlert('No items selected', 'warning');
+            return;
+        }
+
+        // Group items by type
+        const itemsByType = {
+            project: [],
+            document: [],
+            image: []
+        };
+        
+        this.selectedItems.forEach(item => {
+            itemsByType[item.type].push(item);
+        });
+
+        // Show confirmation modal
+        const modal = new bootstrap.Modal(document.getElementById('bulkDeleteModal'));
+        document.getElementById('bulkDeleteCount').textContent = this.selectedItems.size;
+        
+        let detailsHtml = '';
+        if (itemsByType.project.length > 0) {
+            detailsHtml += `<strong>Projects:</strong> ${itemsByType.project.length}<br>`;
+        }
+        if (itemsByType.document.length > 0) {
+            detailsHtml += `<strong>Documents:</strong> ${itemsByType.document.length}<br>`;
+        }
+        if (itemsByType.image.length > 0) {
+            detailsHtml += `<strong>Images:</strong> ${itemsByType.image.length}<br>`;
+        }
+        
+        document.getElementById('bulkDeleteDetails').innerHTML = detailsHtml;
+        
+        // Store items for confirmation
+        this.pendingDeleteItems = itemsByType;
+        
+        modal.show();
+    }
+
+    async confirmBulkDelete() {
+        const modal = bootstrap.Modal.getInstance(document.getElementById('bulkDeleteModal'));
+        modal.hide();
+
+        try {
+            let totalDeleted = 0;
+
+            // Delete in order: images first, then documents, then projects
+            if (this.pendingDeleteItems.image.length > 0) {
+                const imageIds = this.pendingDeleteItems.image.map(item => item.id);
+                const response = await fetch(`${this.apiBaseUrl}/images/bulk_delete/`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({ image_ids: imageIds })
+                });
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    totalDeleted += result.deleted_count;
+                } else {
+                    throw new Error('Failed to delete images');
+                }
+            }
+
+            if (this.pendingDeleteItems.document.length > 0) {
+                const documentIds = this.pendingDeleteItems.document.map(item => item.id);
+                const response = await fetch(`${this.apiBaseUrl}/documents/bulk_delete/`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({ document_ids: documentIds })
+                });
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    totalDeleted += result.deleted_count;
+                } else {
+                    throw new Error('Failed to delete documents');
+                }
+            }
+
+            if (this.pendingDeleteItems.project.length > 0) {
+                const projectIds = this.pendingDeleteItems.project.map(item => item.id);
+                const response = await fetch(`${this.apiBaseUrl}/projects/bulk_delete/`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({ project_ids: projectIds })
+                });
+                
+                if (response.ok) {
+                    const result = await response.json();
+                    totalDeleted += result.deleted_count;
+                } else {
+                    throw new Error('Failed to delete projects');
+                }
+            }
+
+            this.showAlert(`Successfully deleted ${totalDeleted} items`, 'success');
+            
+            // Refresh the project tree and clear selection
+            await this.loadProjects();
+            this.clearSelection();
+            this.toggleBulkSelect(); // Exit bulk select mode
+
+        } catch (error) {
+            console.error('Bulk delete error:', error);
+            this.showAlert('Failed to delete some items', 'danger');
+        }
+
+        this.pendingDeleteItems = null;
+    }
+
+    // Individual delete methods
+    async deleteProject(projectId) {
+        if (confirm('Are you sure you want to delete this project? This will delete all documents and images in it.')) {
+            try {
+                const response = await fetch(`${this.apiBaseUrl}/projects/${projectId}/`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': `Token ${this.authToken}`
+                    }
+                });
+
+                if (response.ok) {
+                    this.showAlert('Project deleted successfully', 'success');
+                    await this.loadProjects();
+                } else {
+                    const error = await response.json();
+                    this.showAlert(error.detail || 'Failed to delete project', 'danger');
+                }
+            } catch (error) {
+                console.error('Delete project error:', error);
+                this.showAlert('Failed to delete project', 'danger');
+            }
+        }
+    }
+
+    async deleteDocument(documentId) {
+        if (confirm('Are you sure you want to delete this document? This will delete all images in it.')) {
+            try {
+                const response = await fetch(`${this.apiBaseUrl}/documents/${documentId}/`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': `Token ${this.authToken}`
+                    }
+                });
+
+                if (response.ok) {
+                    this.showAlert('Document deleted successfully', 'success');
+                    await this.loadProjects();
+                } else {
+                    const error = await response.json();
+                    this.showAlert(error.detail || 'Failed to delete document', 'danger');
+                }
+            } catch (error) {
+                console.error('Delete document error:', error);
+                this.showAlert('Failed to delete document', 'danger');
+            }
+        }
+    }
+
+    async deleteImage(imageId) {
+        if (confirm('Are you sure you want to delete this image?')) {
+            try {
+                const response = await fetch(`${this.apiBaseUrl}/images/${imageId}/`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': `Token ${this.authToken}`
+                    }
+                });
+
+                if (response.ok) {
+                    this.showAlert('Image deleted successfully', 'success');
+                    await this.loadProjects();
+                    
+                    // If this was the current image, clear the viewer
+                    if (this.currentImage && this.currentImage.id === imageId) {
+                        this.currentImage = null;
+                        this.canvas.clear();
+                        document.getElementById('transcriptionContent').innerHTML = 
+                            '<p class="text-muted">Select an image to view transcription</p>';
+                    }
+                } else {
+                    const error = await response.json();
+                    this.showAlert(error.detail || 'Failed to delete image', 'danger');
+                }
+            } catch (error) {
+                console.error('Delete image error:', error);
+                this.showAlert('Failed to delete image', 'danger');
+            }
+        }
+    }
+}
+
+// Global Functions (called from HTML)
+let app;
+
+document.addEventListener('DOMContentLoaded', () => {
+    app = new OCRApp();
+});
+
+// Global functions for HTML onclick handlers
+function showLogin() {
+    app.showLogin();
+}
+
+function showRegister() {
+    app.showRegister();
+}
+
+function showProjects() {
+    app.loadProjects();
+}
+
+function showExports() {
+    // Implementation for exports view
+}
+
+
+
+function logout() {
+    app.logout();
+}
+
+function login(event) {
+    app.login(event);
+}
+
+function register(event) {
+    app.register(event);
+}
+
+function showCredentialsModal() {
+    app.showCredentialsModal();
+}
+
+function saveCredentials() {
+    app.saveCredentials();
+}
+
+function showCreateProjectModal() {
+    app.showCreateProjectModal();
+}
+
+function createProject() {
+    app.createProject();
+}
+
+function showCreateDocumentModal(projectId) {
+    app.showCreateDocumentModal(projectId);
+}
+
+function createDocument() {
+    app.createDocument();
+}
+
+function showUploadImageModal(documentId) {
+    app.showUploadImageModal(documentId);
+}
+
+function uploadImages() {
+    app.uploadImages();
+}
+
+function setTool(tool) {
+    app.setTool(tool);
+}
+
+function transcribeFullImage() {
+    app.transcribeFullImage();
+}
+
+function transcribeSelectedAnnotations() {
+    app.transcribeSelectedAnnotations();
+}
+
+function zoomIn() {
+    app.zoomIn();
+}
+
+function zoomOut() {
+    app.zoomOut();
+}
+
+function resetZoom() {
+    app.resetZoom();
+}
+
+function fitToScreen() {
+    app.fitToScreen();
+}
+
+function toggleSection(sectionType, element) {
+    app.toggleSection(sectionType, element);
+}
+
+function removeTranscription(annotationId) {
+    app.removeTranscription(annotationId);
+}
+
+function selectAnnotationFromTranscription(annotationId) {
+    app.selectAnnotationFromTranscription(annotationId);
+}
+
+function selectAnnotationFromItem(event, annotationId) {
+    app.selectAnnotationFromItem(event, annotationId);
+}
+
+function editTranscription(annotationId) {
+    app.editTranscription(annotationId);
+}
+
+function saveTranscriptionEdit(annotationId) {
+    app.saveTranscriptionEdit(annotationId);
+}
+
+function cancelTranscriptionEdit(annotationId) {
+    app.cancelTranscriptionEdit(annotationId);
+}
+
+function transcribeAnnotationFromList(annotationId) {
+    app.transcribeAnnotationFromList(annotationId);
+} 
+
+function quickEditClassification(event, annotationId) {
+    app.quickEditClassification(event, annotationId);
+}
+
+function toggleInlineEdit(annotationId) {
+    app.toggleInlineEdit(annotationId);
+}
+
+function saveInlineEdit(annotationId) {
+    app.saveInlineEdit(annotationId);
+}
+
+function cancelInlineEdit(annotationId) {
+    app.cancelInlineEdit(annotationId);
+}
+
+function selectAnnotationFromItem(event, annotationId) {
+    app.selectAnnotationFromItem(event, annotationId);
+}
+
+// Panel Management Functions
+function toggleLeftPanel() {
+    app.toggleLeftPanel();
+}
+
+function toggleRightPanel() {
+    app.toggleRightPanel();
+}
+
+function transcribeAllRegions() {
+    app.transcribeAllRegions();
+}
+
+function confirmTranscribeAllRegions() {
+    app.confirmTranscribeAllRegions();
+}
+
+
+
+
+
+// Annotation Editing Functions
+function saveAnnotationEdit() {
+    app.saveAnnotationEdit();
+}
+
+// Prompts Functions
+function showAddPromptModal() {
+    app.showAddPromptModal();
+}
+
+function savePrompt() {
+    app.savePrompt();
+}
+
+function addMetadataField() {
+    app.addMetadataField();
+}
+
+// IIIF Import Functions
+function showIIIFImportModal() {
+    app.showIIIFImportModal();
+}
+
+function setExampleManifest(url) {
+    app.setExampleManifest(url);
+}
+
+function importIIIFManifest() {
+    app.importIIIFManifest();
+}
+
+// Bulk Selection Functions
+function toggleBulkSelect() {
+    app.toggleBulkSelect();
+}
+
+function bulkDeleteSelected() {
+    app.bulkDeleteSelected();
+}
+
+function clearSelection() {
+    app.clearSelection();
+}
+
+function confirmBulkDelete() {
+    app.confirmBulkDelete();
+}
+
+// Zone Color Management Functions
+function updateZoneColor(zoneValue, newColor) {
+    app.updateZoneColor(zoneValue, newColor);
+}
+
+function showAddCustomZoneModal() {
+    app.showAddCustomZoneModal();
+}
+
+function addCustomZone() {
+    app.addCustomZone();
+}
+
+function removeCustomZone(zoneValue) {
+    app.removeCustomZone(zoneValue);
+} 

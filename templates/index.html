@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VLAMy OCR - Vision Language Assistant for My Documents</title>
+    
+    <!-- CSS Framework and Custom Styles -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="/static/css/app.css" rel="stylesheet">
+    
+    <!-- Fabric.js for image annotation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+</head>
+<body>
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">
+                <i class="fas fa-eye me-2"></i>VLAMy OCR
+            </a>
+            
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" onclick="showProjects()">
+                            <i class="fas fa-folder me-1"></i>Projects
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" onclick="showExports()">
+                            <i class="fas fa-download me-1"></i>Exports
+                        </a>
+                    </li>
+                </ul>
+                
+                <ul class="navbar-nav">
+                    <li class="nav-item dropdown" id="userMenu" style="display: none;">
+                        <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
+                            <i class="fas fa-user me-1"></i><span id="username"></span>
+                        </a>
+                        <ul class="dropdown-menu">
+                            <li><a class="dropdown-item" href="#" onclick="showCredentialsModal()">
+                                <i class="fas fa-key me-2"></i>API Credentials
+                            </a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><a class="dropdown-item" href="#" onclick="logout()">
+                                <i class="fas fa-sign-out-alt me-2"></i>Logout
+                            </a></li>
+                        </ul>
+                    </li>
+                    <li class="nav-item" id="loginButton">
+                        <a class="nav-link" href="#" onclick="showLogin()">
+                            <i class="fas fa-sign-in-alt me-1"></i>Login
+                        </a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="container-fluid p-0">
+        <!-- Loading Spinner -->
+        <div id="loadingSpinner" class="d-flex justify-content-center align-items-center position-fixed w-100 h-100" style="top: 0; left: 0; background: rgba(0,0,0,0.5); z-index: 9999; display: none !important;">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+        </div>
+
+        <!-- Welcome Screen -->
+        <div id="welcomeScreen" class="container py-5">
+            <div class="row justify-content-center">
+                <div class="col-lg-8 text-center">
+                    <h1 class="display-4 mb-4">
+                        <i class="fas fa-eye text-primary"></i>
+                        VLAMy OCR
+                    </h1>
+                    <p class="lead mb-4">
+                        Vision Language Assistant for Document Transcription and Analysis
+                    </p>
+                    <p class="mb-4">
+                        Upload images, draw annotations, and transcribe text using OpenAI or custom OCR endpoints.
+                        Organize your work with projects and documents, share with collaborators, and export your data.
+                    </p>
+                    
+                    <div class="row g-4 mt-4">
+                        <div class="col-md-4">
+                            <div class="card h-100">
+                                <div class="card-body text-center">
+                                    <i class="fas fa-upload fa-3x text-primary mb-3"></i>
+                                    <h5>Upload Images</h5>
+                                    <p class="text-muted">Upload documents, photos, or any images containing text</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card h-100">
+                                <div class="card-body text-center">
+                                    <i class="fas fa-draw-polygon fa-3x text-primary mb-3"></i>
+                                    <h5>Annotate Regions</h5>
+                                    <p class="text-muted">Draw bounding boxes or polygons around text regions</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="card h-100">
+                                <div class="card-body text-center">
+                                    <i class="fas fa-robot fa-3x text-primary mb-3"></i>
+                                    <h5>AI Transcription</h5>
+                                    <p class="text-muted">Use OpenAI or custom endpoints to transcribe text</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="mt-5">
+                        <button class="btn btn-primary btn-lg me-3" onclick="showRegister()">
+                            <i class="fas fa-user-plus me-2"></i>Get Started
+                        </button>
+                        <button class="btn btn-outline-primary btn-lg" onclick="showLogin()">
+                            <i class="fas fa-sign-in-alt me-2"></i>Sign In
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Login Form -->
+        <div id="loginScreen" class="container py-5" style="display: none;">
+            <div class="row justify-content-center">
+                <div class="col-md-6 col-lg-4">
+                    <div class="card">
+                        <div class="card-header text-center">
+                            <h4><i class="fas fa-sign-in-alt me-2"></i>Sign In</h4>
+                        </div>
+                        <div class="card-body">
+                            <form id="loginForm" onsubmit="login(event)">
+                                <div class="mb-3">
+                                    <label for="loginUsername" class="form-label">Username</label>
+                                    <input type="text" class="form-control" id="loginUsername" required>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="loginPassword" class="form-label">Password</label>
+                                    <input type="password" class="form-control" id="loginPassword" required>
+                                </div>
+                                <button type="submit" class="btn btn-primary w-100">
+                                    <i class="fas fa-sign-in-alt me-2"></i>Sign In
+                                </button>
+                            </form>
+                            <div class="text-center mt-3">
+                                <a href="#" onclick="showRegister()">Don't have an account? Register</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Registration Form -->
+        <div id="registerScreen" class="container py-5" style="display: none;">
+            <div class="row justify-content-center">
+                <div class="col-md-8 col-lg-6">
+                    <div class="card">
+                        <div class="card-header text-center">
+                            <h4><i class="fas fa-user-plus me-2"></i>Request Account</h4>
+                        </div>
+                        <div class="card-body">
+                            <div class="alert alert-info">
+                                <i class="fas fa-info-circle me-2"></i>
+                                Account requests require admin approval. You'll be notified when your account is ready.
+                            </div>
+                            <form id="registerForm" onsubmit="register(event)">
+                                <div class="row">
+                                    <div class="col-md-6 mb-3">
+                                        <label for="regFirstName" class="form-label">First Name</label>
+                                        <input type="text" class="form-control" id="regFirstName" required>
+                                    </div>
+                                    <div class="col-md-6 mb-3">
+                                        <label for="regLastName" class="form-label">Last Name</label>
+                                        <input type="text" class="form-control" id="regLastName" required>
+                                    </div>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="regUsername" class="form-label">Username</label>
+                                    <input type="text" class="form-control" id="regUsername" required>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="regEmail" class="form-label">Email</label>
+                                    <input type="email" class="form-control" id="regEmail" required>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="regPassword" class="form-label">Password</label>
+                                    <input type="password" class="form-control" id="regPassword" required>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="regPasswordConfirm" class="form-label">Confirm Password</label>
+                                    <input type="password" class="form-control" id="regPasswordConfirm" required>
+                                </div>
+                                <button type="submit" class="btn btn-primary w-100">
+                                    <i class="fas fa-user-plus me-2"></i>Request Account
+                                </button>
+                            </form>
+                            <div class="text-center mt-3">
+                                <a href="#" onclick="showLogin()">Already have an account? Sign In</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Application Interface -->
+        <div id="appInterface" style="display: none;">
+            <!-- Sidebar -->
+            <div class="row g-0" id="mainAppContainer">
+                <div class="col-md-3 bg-light border-end" id="leftSidebar">
+                    <!-- Left Panel Collapse Button -->
+                    <div class="panel-collapse-btn left-panel-btn" onclick="toggleLeftPanel()">
+                        <i class="fas fa-chevron-left" id="leftPanelIcon"></i>
+                    </div>
+                    
+                    <div class="sidebar p-3">
+                        <!-- API Credentials Setup -->
+                        <div class="card mb-3" id="credentialsCard">
+                            <div class="card-header">
+                                <h6 class="mb-0">
+                                    <i class="fas fa-key me-2"></i>API Credentials
+                                    <span class="badge bg-warning ms-2" id="credentialsStatus">Not Set</span>
+                                </h6>
+                            </div>
+                            <div class="card-body">
+                                <button class="btn btn-outline-primary btn-sm w-100" onclick="showCredentialsModal()">
+                                    <i class="fas fa-cog me-2"></i>Configure
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Project Tree -->
+                        <div class="card">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <h6 class="mb-0">
+                                    <i class="fas fa-folder me-2"></i>Projects
+                                </h6>
+                                <div class="btn-group">
+                                    <button class="btn btn-outline-primary btn-sm" onclick="showCreateProjectModal()">
+                                        <i class="fas fa-plus"></i>
+                                    </button>
+                                    <button class="btn btn-outline-info btn-sm" onclick="showIIIFImportModal()">
+                                        <i class="fas fa-globe"></i>
+                                    </button>
+                                    <button class="btn btn-outline-danger btn-sm" onclick="toggleBulkSelect()" id="bulkSelectBtn">
+                                        <i class="fas fa-check-square"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="card-body p-0">
+                                <!-- Bulk Actions Bar -->
+                                <div id="bulkActionsBar" class="bulk-actions-bar p-2 bg-light border-bottom" style="display: none;">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <span id="selectedCount">0 selected</span>
+                                        <div class="btn-group btn-group-sm">
+                                            <button class="btn btn-outline-danger" onclick="bulkDeleteSelected()">
+                                                <i class="fas fa-trash me-1"></i>Delete Selected
+                                            </button>
+                                            <button class="btn btn-outline-secondary" onclick="clearSelection()">
+                                                <i class="fas fa-times me-1"></i>Clear
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div id="projectTree" class="tree-view">
+                            <!-- Projects will be loaded here -->
+                        </div>
+                        
+                        <!-- Annotation Types Configuration -->
+                        <div class="sidebar-section mt-4">
+                            <h6 class="sidebar-section-title text-center">
+                                <i class="fas fa-cog me-2"></i>ANNOTATION TYPES
+                            </h6>
+                            <div class="annotation-types-config">
+                                <div class="config-checklist" id="annotationTypesChecklist">
+                                    <!-- Annotation types will be populated by JavaScript -->
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Prompts Section -->
+                        <div class="sidebar-section mt-4">
+                            <h6 class="sidebar-section-title text-center">
+                                <i class="fas fa-comment-dots me-2"></i>PROMPTS
+                                <button class="btn btn-xs btn-outline-primary ms-2" onclick="showAddPromptModal()">
+                                    <i class="fas fa-plus"></i>
+                                </button>
+                            </h6>
+                            <div id="promptsList" class="prompts-list">
+                                <!-- Prompts will be loaded here -->
+                            </div>
+                        </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Left Resize Handle -->
+                <div class="resize-handle left-resize" id="leftResizeHandle"></div>
+
+                <!-- Main Content Area -->
+                <div class="col-md-9" id="mainContent">
+                    <div class="main-content">
+                        <!-- Image Viewer and Annotation Tools -->
+                        <div id="imageViewer" style="display: none;">
+                            <div class="toolbar bg-light p-2 border-bottom">
+                                <div class="btn-group me-3" role="group">
+                                    <button class="btn btn-outline-secondary active" id="selectTool" onclick="setTool('select')">
+                                        <i class="fas fa-mouse-pointer"></i>
+                                    </button>
+                                    <button class="btn btn-outline-secondary" id="bboxTool" onclick="setTool('bbox')">
+                                        <i class="fas fa-square"></i>
+                                    </button>
+                                    <button class="btn btn-outline-secondary" id="polygonTool" onclick="setTool('polygon')">
+                                        <i class="fas fa-draw-polygon"></i>
+                                    </button>
+                                </div>
+                                
+                                <!-- Classification Selector (shown when bbox tool is active) -->
+                                <div class="annotation-classification me-3" id="classificationSelector" style="display: none;">
+                                    <label class="form-label small me-2 mb-0">Classification:</label>
+                                    <select class="form-select form-select-sm" id="annotationClassification" style="width: auto;">
+                                        <option value="">No classification</option>
+                                        <!-- Options will be populated by JavaScript -->
+                                    </select>
+                                </div>
+                                
+                                <div class="btn-group me-3" role="group">
+                                    <button class="btn btn-outline-primary" onclick="transcribeFullImage()">
+                                        <i class="fas fa-robot me-1"></i>Transcribe Image
+                                    </button>
+                                    <button class="btn btn-outline-success" onclick="transcribeSelectedAnnotations()">
+                                        <i class="fas fa-magic me-1"></i>Transcribe Selected
+                                    </button>
+                                    <button class="btn btn-outline-warning" onclick="transcribeAllRegions()">
+                                        <i class="fas fa-layer-group me-1"></i>Transcribe All Regions
+                                    </button>
+                                </div>
+                                
+                                <div class="btn-group" role="group">
+                                    <button class="btn btn-outline-secondary" onclick="zoomIn()" title="Zoom In">
+                                        <i class="fas fa-search-plus"></i>
+                                    </button>
+                                    <button class="btn btn-outline-secondary" onclick="zoomOut()" title="Zoom Out">
+                                        <i class="fas fa-search-minus"></i>
+                                    </button>
+                                    <button class="btn btn-outline-secondary" onclick="resetZoom()" title="Reset Zoom">
+                                        <i class="fas fa-expand-arrows-alt"></i>
+                                    </button>
+                                    <button class="btn btn-outline-secondary" onclick="fitToScreen()" title="Fit to Screen">
+                                        <i class="fas fa-compress-arrows-alt"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <div class="viewer-container d-flex">
+                                <div class="canvas-container flex-grow-1">
+                                    <canvas id="fabricCanvas"></canvas>
+                                </div>
+                                
+                                <!-- Right Resize Handle -->
+                                <div class="resize-handle right-resize" id="rightResizeHandle"></div>
+                                
+                                <!-- Transcription Panel -->
+                                <div class="transcription-panel bg-light p-3" id="transcriptionPanel" style="width: 800px; min-height: 600px; overflow-y: auto;">
+                                    <!-- Right Panel Collapse Button -->
+                                    <div class="panel-collapse-btn right-panel-btn" onclick="toggleRightPanel()">
+                                        <i class="fas fa-chevron-right" id="rightPanelIcon"></i>
+                                    </div>
+                                    
+                                    <h6><i class="fas fa-align-left me-2"></i>Transcription</h6>
+                                    <div id="transcriptionContent">
+                                        <p class="text-muted">Select an image to view transcription</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Default View -->
+                        <div id="defaultView" class="p-4 text-center">
+                            <i class="fas fa-images fa-5x text-muted mb-3"></i>
+                            <h4 class="text-muted">Select an image to start annotating</h4>
+                            <p class="text-muted">Choose a project and document from the sidebar, then select an image to begin.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <!-- API Credentials Modal -->
+    <div class="modal fade" id="credentialsModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-key me-2"></i>API Credentials
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-info">
+                        <i class="fas fa-shield-alt me-2"></i>
+                        Credentials are stored locally in your browser and never sent to our servers.
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-12 mb-3">
+                            <label for="openaiApiKey" class="form-label">OpenAI API Key</label>
+                            <input type="password" class="form-control" id="openaiApiKey" placeholder="sk-...">
+                            <div class="form-text">Used for GPT-4 Vision transcription</div>
+                        </div>
+                        
+                        <div class="col-12 mb-3">
+                            <label for="customEndpoint" class="form-label">Custom OCR Endpoint</label>
+                            <input type="url" class="form-control" id="customEndpoint" placeholder="https://your-api.com/ocr">
+                            <div class="form-text">Alternative OCR service endpoint</div>
+                        </div>
+                        
+                        <div class="col-12 mb-3">
+                            <label for="customAuth" class="form-label">Custom Endpoint Authorization</label>
+                            <input type="password" class="form-control" id="customAuth" placeholder="Bearer token or API key">
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="saveCredentials()">
+                        <i class="fas fa-save me-2"></i>Save
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Annotation Modal -->
+    <div class="modal fade" id="editAnnotationModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-edit me-2"></i>Edit Annotation
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="editAnnotationForm">
+                        <div class="mb-3">
+                            <label for="editAnnotationClassification" class="form-label">Classification</label>
+                            <select class="form-select" id="editAnnotationClassification">
+                                <option value="">No classification</option>
+                                <!-- Options will be populated by JavaScript -->
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label for="editAnnotationLabel" class="form-label">Label</label>
+                            <input type="text" class="form-control" id="editAnnotationLabel" placeholder="Optional label">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Metadata</label>
+                            <div id="editAnnotationMetadata">
+                                <!-- Metadata fields will be populated by JavaScript -->
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="saveAnnotationEdit()">
+                        <i class="fas fa-save me-2"></i>Save Changes
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add/Edit Prompt Modal -->
+    <div class="modal fade" id="promptModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="promptModalTitle">
+                        <i class="fas fa-comment-dots me-2"></i>Add Prompt
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="promptForm">
+                        <div class="mb-3">
+                            <label for="promptName" class="form-label">Prompt Name</label>
+                            <input type="text" class="form-control" id="promptName" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="promptText" class="form-label">Prompt Text</label>
+                            <textarea class="form-control" id="promptText" rows="4" required 
+                                      placeholder="Enter the transcription prompt instructions..."></textarea>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Applicable Zone Types</label>
+                            <div class="row" id="promptZoneTypes">
+                                <!-- Zone type checkboxes will be populated by JavaScript -->
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Metadata Fields</label>
+                            <div id="promptMetadataFields">
+                                <!-- Metadata field definitions will be populated by JavaScript -->
+                            </div>
+                            <button type="button" class="btn btn-sm btn-outline-primary mt-2" onclick="addMetadataField()">
+                                <i class="fas fa-plus me-1"></i>Add Metadata Field
+                            </button>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="savePrompt()">
+                        <i class="fas fa-save me-2"></i>Save Prompt
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Project Modal -->
+    <div class="modal fade" id="createProjectModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-folder-plus me-2"></i>Create New Project
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="createProjectForm">
+                        <div class="mb-3">
+                            <label for="projectName" class="form-label">Project Name</label>
+                            <input type="text" class="form-control" id="projectName" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="projectDescription" class="form-label">Description</label>
+                            <textarea class="form-control" id="projectDescription" rows="3"></textarea>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="createProject()">
+                        <i class="fas fa-plus me-2"></i>Create
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Document Modal -->
+    <div class="modal fade" id="createDocumentModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-file-alt me-2 text-primary"></i>Create New Document
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="createDocumentForm">
+                        <div class="mb-3">
+                            <label for="documentName" class="form-label">Document Name</label>
+                            <input type="text" class="form-control" id="documentName" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="documentDescription" class="form-label">Description</label>
+                            <textarea class="form-control" id="documentDescription" rows="3"></textarea>
+                        </div>
+                        <div class="mb-3">
+                            <label for="documentReadingOrder" class="form-label">Reading Order</label>
+                            <select class="form-control" id="documentReadingOrder">
+                                <option value="">Use default</option>
+                                <option value="top_to_bottom_left_to_right">Top to Bottom, Left to Right</option>
+                                <option value="left_to_right_top_to_bottom">Left to Right, Top to Bottom</option>
+                                <option value="bottom_to_top_left_to_right">Bottom to Top, Left to Right</option>
+                                <option value="right_to_left_top_to_bottom">Right to Left, Top to Bottom</option>
+                            </select>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="createDocument()">
+                        <i class="fas fa-plus me-2"></i>Create
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Upload Image Modal -->
+    <div class="modal fade" id="uploadImageModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-image me-2"></i>Upload Images
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="uploadImageForm" enctype="multipart/form-data">
+                        <div class="mb-3">
+                            <label for="imageFiles" class="form-label">Select Images</label>
+                            <input type="file" class="form-control" id="imageFiles" multiple accept="image/*" required>
+                            <div class="form-text">Supported formats: JPG, PNG, TIFF, BMP, GIF</div>
+                        </div>
+                        <div class="mb-3">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="autoTranscribe">
+                                <label class="form-check-label" for="autoTranscribe">
+                                    Auto-transcribe after upload
+                                </label>
+                            </div>
+                        </div>
+                        <div id="uploadProgress" style="display: none;">
+                            <div class="progress mb-3">
+                                <div class="progress-bar" role="progressbar" style="width: 0%"></div>
+                            </div>
+                            <div id="uploadStatus"></div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="uploadImages()">
+                        <i class="fas fa-upload me-2"></i>Upload
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Transcribe All Regions Warning Modal -->
+    <div class="modal fade" id="transcribeAllModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-exclamation-triangle text-warning me-2"></i>Transcribe All Regions
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-warning">
+                        <i class="fas fa-exclamation-triangle me-2"></i>
+                        <strong>Warning:</strong> This will overwrite existing transcriptions for all regions in this image.
+                    </div>
+                    <p>Are you sure you want to transcribe all <span id="regionCount"></span> regions? This action cannot be undone.</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-warning" onclick="confirmTranscribeAllRegions()">
+                        <i class="fas fa-layer-group me-2"></i>Transcribe All
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- IIIF Import Modal -->
+    <div class="modal fade" id="iiifImportModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-globe me-2 text-info"></i>Import from IIIF Manifest
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-info">
+                        <i class="fas fa-info-circle me-2"></i>
+                        <strong>IIIF Import:</strong> This will create a new project and document from a IIIF manifest URL, automatically downloading all images.
+                    </div>
+                    <form id="iiifImportForm">
+                        <div class="mb-3">
+                            <label for="iiifManifestUrl" class="form-label">IIIF Manifest URL</label>
+                            <input type="url" class="form-control" id="iiifManifestUrl" required 
+                                   placeholder="https://example.com/manifest.json">
+                            <div class="form-text">Enter the URL of a IIIF Presentation API manifest</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="iiifMaxWidth" class="form-label">Image Resolution</label>
+                            <select class="form-control" id="iiifMaxWidth">
+                                <option value="800">Small (800px width)</option>
+                                <option value="1000" selected>Medium (1000px width)</option>
+                                <option value="1500">Large (1500px width)</option>
+                                <option value="2000">Extra Large (2000px width)</option>
+                                <option value="full">Full Resolution</option>
+                            </select>
+                            <div class="form-text">Choose the maximum image size to download. Smaller sizes import faster.</div>
+                        </div>
+                        <div class="mb-3">
+                            <h6>Examples:</h6>
+                            <div class="list-group">
+                                <button type="button" class="list-group-item list-group-item-action" 
+                                        onclick="setExampleManifest('https://iiif.io/api/cookbook/recipe/0001-mvm-image/manifest.json')">
+                                    <strong>Simple Image Manifest</strong><br>
+                                    <small class="text-muted">https://iiif.io/api/cookbook/recipe/0001-mvm-image/manifest.json</small>
+                                </button>
+                                <button type="button" class="list-group-item list-group-item-action" 
+                                        onclick="setExampleManifest('https://collections.library.yale.edu/manifests/32188747')">
+                                    <strong>Yale Digital Collections</strong><br>
+                                    <small class="text-muted">Stieglitz correspondence from Yale (IIIF 3.0)</small>
+                                </button>
+                                <button type="button" class="list-group-item list-group-item-action" 
+                                        onclick="setExampleManifest('https://iiif.bodleian.ox.ac.uk/iiif/manifest/748a9d50-1acd-4b8d-93b8-26db5c43b6d9.json')">
+                                    <strong>Bodleian Library Manuscript</strong><br>
+                                    <small class="text-muted">Medieval manuscript example (IIIF 2.0)</small>
+                                </button>
+                            </div>
+                        </div>
+                        <div id="iiifImportProgress" style="display: none;">
+                            <div class="progress mb-3">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%"></div>
+                            </div>
+                            <div id="iiifImportStatus">Processing manifest...</div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-info" onclick="importIIIFManifest()">
+                        <i class="fas fa-download me-2"></i>Import
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bulk Delete Confirmation Modal -->
+    <div class="modal fade" id="bulkDeleteModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-exclamation-triangle text-danger me-2"></i>Confirm Bulk Delete
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-danger">
+                        <i class="fas fa-exclamation-triangle me-2"></i>
+                        <strong>Warning:</strong> This action cannot be undone.
+                    </div>
+                    <p>Are you sure you want to delete <span id="bulkDeleteCount"></span> selected items?</p>
+                    <div id="bulkDeleteDetails"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-danger" onclick="confirmBulkDelete()">
+                        <i class="fas fa-trash me-2"></i>Delete Selected
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Alert Container -->
+    <div id="alertContainer" class="position-fixed top-0 end-0 p-3" style="z-index: 1060;">
+        <!-- Alerts will be added here -->
+    </div>
+
+    <!-- JavaScript Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/app.js"></script>
+</body>
+</html> 
