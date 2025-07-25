@@ -372,6 +372,9 @@ async ensureMainZonePrompt() {
         
         // Initialize panel resize functionality
         this.initPanelResize();
+        
+        // Initialize model selection
+        this.populateModelSelection();
     }
 
     showLoading(show) {
@@ -1688,7 +1691,8 @@ async ensureMainZonePrompt() {
         }
 
         const credentials = this.getStoredCredentials();
-        if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+        const provider = this.getActiveProvider();
+        if (!provider) {
             this.showAlert('Please configure your API credentials first', 'warning');
             this.showCredentialsModal();
             return;
@@ -1698,15 +1702,22 @@ async ensureMainZonePrompt() {
             // Show processing indicator in the transcription section
             this.showFullImageTranscriptionProgress(true);
             
+            const selectedModel = this.getSelectedModel();
             const requestData = {
                 transcription_type: 'full_image',
-                api_endpoint: credentials.openai_api_key ? 'openai' : credentials.custom_endpoint_url,
-                api_model: 'gpt-4o-mini'
+                api_endpoint: selectedModel.provider,
+                api_model: selectedModel.model
             };
 
-            if (credentials.openai_api_key) {
+            if (selectedModel.provider === 'openai') {
                 requestData.openai_api_key = credentials.openai_api_key;
-            } else {
+            } else if (selectedModel.provider === 'vertex') {
+                requestData.vertex_access_token = credentials.vertex_access_token;
+                requestData.vertex_project_id = credentials.vertex_project_id;
+                requestData.vertex_location = credentials.vertex_location;
+                requestData.vertex_model = selectedModel.model;
+            } else if (selectedModel.provider === 'custom') {
+                requestData.custom_endpoint_url = credentials.custom_endpoint_url;
                 requestData.custom_endpoint_auth = credentials.custom_endpoint_auth;
             }
 
@@ -1742,7 +1753,8 @@ async ensureMainZonePrompt() {
         }
 
         const credentials = this.getStoredCredentials();
-        if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+        const provider = this.getActiveProvider();
+        if (!provider) {
             this.showAlert('Please configure your API credentials first', 'warning');
             this.showCredentialsModal();
             return;
@@ -1767,15 +1779,16 @@ async ensureMainZonePrompt() {
             const prompt = this.getPromptForAnnotation(annotation);
             let finalPrompt = prompt.prompt;
             
+            const selectedModel = this.getSelectedModel();
             const requestData = {
                 transcription_type: 'annotation',
-                api_endpoint: credentials.openai_api_key ? 'openai' : credentials.custom_endpoint_url,
-                api_model: 'gpt-4o-mini',
+                api_endpoint: selectedModel.provider,
+                api_model: selectedModel.model,
                 custom_prompt: finalPrompt,
                 expected_metadata: prompt.metadata_fields || []
             };
 
-            if (credentials.openai_api_key) {
+            if (selectedModel.provider === 'openai') {
                 requestData.openai_api_key = credentials.openai_api_key;
                 // For OpenAI, use structured output if metadata is expected
                 if (prompt.metadata_fields && prompt.metadata_fields.length > 0) {
@@ -1786,7 +1799,19 @@ async ensureMainZonePrompt() {
                     finalPrompt += '\n\nReturn the transcription as plain text. The main text should be clean and readable.';
                     requestData.custom_prompt = finalPrompt;
                 }
-            } else {
+            } else if (selectedModel.provider === 'vertex') {
+                requestData.vertex_access_token = credentials.vertex_access_token;
+                requestData.vertex_project_id = credentials.vertex_project_id;
+                requestData.vertex_location = credentials.vertex_location;
+                requestData.vertex_model = selectedModel.model;
+                // For Vertex, modify prompt to request JSON output
+                if (prompt.metadata_fields && prompt.metadata_fields.length > 0) {
+                    finalPrompt += '\n\nPlease also return metadata in JSON format with the following fields: ' +
+                        prompt.metadata_fields.map(f => `${f.name} (${f.type})`).join(', ') +
+                        '. Return both the transcription and metadata in a JSON object with "text" and "metadata" keys in the following format:\n\n```json\n{"text": "your transcription here", "metadata": {"field1": value1, "field2": value2}}\n```';
+                }
+                requestData.custom_prompt = finalPrompt;
+            } else if (selectedModel.provider === 'custom') {
                 // For other models, modify prompt to request JSON output
                 if (prompt.metadata_fields && prompt.metadata_fields.length > 0) {
                     finalPrompt += '\n\nPlease also return metadata in JSON format with the following fields: ' +
@@ -1938,6 +1963,14 @@ async ensureMainZonePrompt() {
             // Parse and clean the transcription response
             const processedTranscription = this.processTranscriptionResponse(transcription);
             annotation.transcription = processedTranscription;
+            
+            // Store the model information in the annotation metadata
+            const selectedModel = this.getSelectedModel();
+            if (!annotation.metadata) {
+                annotation.metadata = {};
+            }
+            annotation.metadata.transcription_model = selectedModel.model;
+            annotation.metadata.transcription_provider = selectedModel.provider;
             
             // If the processed transcription contains metadata, update the annotation
             if (processedTranscription.parsed_metadata && Object.keys(processedTranscription.parsed_metadata).length > 0) {
@@ -2163,6 +2196,7 @@ async ensureMainZonePrompt() {
                                 const hasTranscription = annotation.transcription && annotation.transcription.text_content;
                                 const classificationType = this.getClassificationType(annotation.classification);
                                 const metadataDisplay = this.formatMetadataDisplay(annotation.metadata);
+                                const modelInfo = this.formatTranscriptionModelInfo(annotation);
                                 const classificationColor = annotation.classification ? (this.zoneColors[annotation.classification] || '#6c757d') : '#6c757d';
                                 const borderColor = annotation.classification ? classificationColor : '#dee2e6';
                                 return `
@@ -2226,6 +2260,11 @@ async ensureMainZonePrompt() {
                                         <div class="metadata-display mb-2" id="metadata-display-${annotation.id}">
                                             <small class="text-muted">Metadata:</small>
                                             <div class="metadata-content small">${metadataDisplay}</div>
+                                        </div>
+                                    ` : ''}
+                                    ${modelInfo ? `
+                                        <div class="model-info mb-2">
+                                            ${modelInfo}
                                         </div>
                                     ` : ''}
                                     <div class="transcription-text-content">
@@ -2580,7 +2619,8 @@ async ensureMainZonePrompt() {
 
     async transcribeAnnotationFromList(annotationId) {
         const credentials = this.getStoredCredentials();
-        if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+        const provider = this.getActiveProvider();
+        if (!provider) {
             this.showAlert('Please configure your API credentials first', 'warning');
             this.showCredentialsModal();
             return;
@@ -3267,6 +3307,28 @@ async ensureMainZonePrompt() {
         }
     }
 
+    formatTranscriptionModelInfo(annotation) {
+        if (!annotation.metadata) return '';
+        
+        const model = annotation.metadata.transcription_model;
+        const provider = annotation.metadata.transcription_provider;
+        
+        if (!model || !provider) return '';
+        
+        let modelLabel = model;
+        if (provider === 'openai') {
+            if (model === 'gpt-4o-mini') modelLabel = 'GPT-4o Mini';
+            else if (model === 'gpt-4o') modelLabel = 'GPT-4o';
+        } else if (provider === 'vertex') {
+            if (model === 'google/gemini-2.0-flash-lite-001') modelLabel = 'Gemini 2.0 Flash Lite';
+            else if (model === 'google/gemini-2.0-flash-001') modelLabel = 'Gemini 2.0 Flash';
+            else if (model === 'google/gemini-2.5-flash') modelLabel = 'Gemini 2.5 Flash';
+            else if (model === 'google/gemini-2.5-pro') modelLabel = 'Gemini 2.5 Pro';
+        }
+        
+        return `<span class="badge bg-secondary me-2" title="Transcription Model"><i class="fas fa-robot me-1"></i>${modelLabel}</span>`;
+    }
+
     // Progress Indicator Methods
     showAnnotationProgress(annotationId, show) {
         // Show spinner on canvas annotation
@@ -3369,18 +3431,147 @@ async ensureMainZonePrompt() {
     getStoredCredentials() {
         return {
             openai_api_key: localStorage.getItem('openai_api_key'),
+            openai_model: localStorage.getItem('openai_model') || 'gpt-4o-mini',
             custom_endpoint_url: localStorage.getItem('custom_endpoint_url'),
             custom_endpoint_auth: localStorage.getItem('custom_endpoint_auth'),
+            vertex_access_token: localStorage.getItem('vertex_access_token'),
+            vertex_project_id: localStorage.getItem('vertex_project_id'),
+            vertex_location: localStorage.getItem('vertex_location') || 'us-central1',
+            vertex_model: localStorage.getItem('vertex_model') || 'google/gemini-2.0-flash-lite-001',
             roboflow_api_key: localStorage.getItem('roboflow_api_key'),
             roboflow_workspace_name: localStorage.getItem('roboflow_workspace_name'),
             roboflow_workflow_id: localStorage.getItem('roboflow_workflow_id')
         };
     }
 
+    getActiveProvider() {
+        const credentials = this.getStoredCredentials();
+        
+        // Priority: OpenAI > Vertex > Custom
+        if (credentials.openai_api_key) {
+            return 'openai';
+        } else if (credentials.vertex_access_token && credentials.vertex_project_id) {
+            return 'vertex';
+        } else if (credentials.custom_endpoint_url) {
+            return 'custom';
+        }
+        
+        return null;
+    }
+
+    getActiveModel() {
+        const credentials = this.getStoredCredentials();
+        const provider = this.getActiveProvider();
+        
+        switch (provider) {
+            case 'openai':
+                return credentials.openai_model;
+            case 'vertex':
+                return credentials.vertex_model;
+            default:
+                return 'gpt-4o-mini'; // fallback
+        }
+    }
+
+    getAvailableModels() {
+        const credentials = this.getStoredCredentials();
+        const models = [];
+        
+        if (credentials.openai_api_key) {
+            models.push({
+                provider: 'openai',
+                value: 'gpt-4o-mini',
+                label: 'GPT-4o Mini (OpenAI)'
+            });
+            models.push({
+                provider: 'openai',
+                value: 'gpt-4o',
+                label: 'GPT-4o (OpenAI)'
+            });
+        }
+        
+        if (credentials.vertex_access_token && credentials.vertex_project_id) {
+            models.push({
+                provider: 'vertex',
+                value: 'google/gemini-2.0-flash-lite-001',
+                label: 'Gemini 2.0 Flash Lite (Vertex)'
+            });
+            models.push({
+                provider: 'vertex',
+                value: 'google/gemini-2.0-flash-001',
+                label: 'Gemini 2.0 Flash (Vertex)'
+            });
+            models.push({
+                provider: 'vertex',
+                value: 'google/gemini-2.5-flash-preview-05-20',
+                label: 'Gemini 2.5 Flash (Vertex)'
+            });
+            models.push({
+                provider: 'vertex',
+                value: 'google/gemini-2.5-pro-preview-05-20',
+                label: 'Gemini 2.5 Pro (Vertex)'
+            });
+        }
+        
+        if (credentials.custom_endpoint_url) {
+            models.push({
+                provider: 'custom',
+                value: 'custom',
+                label: 'Custom Endpoint'
+            });
+        }
+        
+        return models;
+    }
+
+    populateModelSelection() {
+        const modelSelect = document.getElementById('transcriptionModel');
+        if (!modelSelect) return;
+        
+        const models = this.getAvailableModels();
+        const currentModel = this.getActiveModel();
+        
+        modelSelect.innerHTML = '';
+        
+        if (models.length === 0) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = 'No models available';
+            option.disabled = true;
+            modelSelect.appendChild(option);
+            return;
+        }
+        
+        models.forEach(model => {
+            const option = document.createElement('option');
+            option.value = `${model.provider}:${model.value}`;
+            option.textContent = model.label;
+            if (model.value === currentModel) {
+                option.selected = true;
+            }
+            modelSelect.appendChild(option);
+        });
+    }
+
+    getSelectedModel() {
+        const modelSelect = document.getElementById('transcriptionModel');
+        if (!modelSelect || !modelSelect.value) {
+            return this.getActiveModel(); // fallback to default
+        }
+        
+        const [provider, model] = modelSelect.value.split(':');
+        return { provider, model };
+    }
+
     saveCredentials() {
         const openaiKey = document.getElementById('openaiApiKey').value;
+        const openaiModel = document.getElementById('openaiModel').value;
         const customEndpoint = document.getElementById('customEndpoint').value;
         const customAuth = document.getElementById('customAuth').value;
+        const vertexAccessToken = document.getElementById('vertexAccessToken').value;
+        const vertexProjectId = document.getElementById('vertexProjectId').value;
+        const vertexLocation = document.getElementById('vertexLocation').value;
+        const vertexModel = document.getElementById('vertexModel').value;
         const roboflowKey = document.getElementById('roboflowApiKey').value;
         const roboflowWorkspace = document.getElementById('roboflowWorkspace').value;
         const roboflowWorkflowId = document.getElementById('roboflowWorkflowId').value;
@@ -3389,6 +3580,12 @@ async ensureMainZonePrompt() {
             localStorage.setItem('openai_api_key', openaiKey);
         } else {
             localStorage.removeItem('openai_api_key');
+        }
+
+        if (openaiModel) {
+            localStorage.setItem('openai_model', openaiModel);
+        } else {
+            localStorage.removeItem('openai_model');
         }
 
         if (customEndpoint) {
@@ -3401,6 +3598,30 @@ async ensureMainZonePrompt() {
             localStorage.setItem('custom_endpoint_auth', customAuth);
         } else {
             localStorage.removeItem('custom_endpoint_auth');
+        }
+
+        if (vertexAccessToken) {
+            localStorage.setItem('vertex_access_token', vertexAccessToken);
+        } else {
+            localStorage.removeItem('vertex_access_token');
+        }
+
+        if (vertexProjectId) {
+            localStorage.setItem('vertex_project_id', vertexProjectId);
+        } else {
+            localStorage.removeItem('vertex_project_id');
+        }
+
+        if (vertexLocation) {
+            localStorage.setItem('vertex_location', vertexLocation);
+        } else {
+            localStorage.removeItem('vertex_location');
+        }
+
+        if (vertexModel) {
+            localStorage.setItem('vertex_model', vertexModel);
+        } else {
+            localStorage.removeItem('vertex_model');
         }
 
         if (roboflowKey) {
@@ -3431,7 +3652,8 @@ async ensureMainZonePrompt() {
         const credentials = this.getStoredCredentials();
         const statusBadge = document.getElementById('credentialsStatus');
         
-        if (credentials.openai_api_key || credentials.custom_endpoint_url) {
+        if (credentials.openai_api_key || credentials.custom_endpoint_url || 
+            (credentials.vertex_access_token && credentials.vertex_project_id)) {
             statusBadge.textContent = 'Configured';
             statusBadge.className = 'badge bg-success ms-2';
         } else {
@@ -3446,11 +3668,19 @@ async ensureMainZonePrompt() {
         // Pre-fill existing values
         const credentials = this.getStoredCredentials();
         document.getElementById('openaiApiKey').value = credentials.openai_api_key || '';
+        document.getElementById('openaiModel').value = credentials.openai_model || 'gpt-4o-mini';
         document.getElementById('customEndpoint').value = credentials.custom_endpoint_url || '';
         document.getElementById('customAuth').value = credentials.custom_endpoint_auth || '';
+        document.getElementById('vertexAccessToken').value = credentials.vertex_access_token || '';
+        document.getElementById('vertexProjectId').value = credentials.vertex_project_id || '';
+        document.getElementById('vertexLocation').value = credentials.vertex_location || 'us-central1';
+        document.getElementById('vertexModel').value = credentials.vertex_model || 'google/gemini-2.0-flash-lite-001';
         document.getElementById('roboflowApiKey').value = credentials.roboflow_api_key || '';
         document.getElementById('roboflowWorkspace').value = credentials.roboflow_workspace_name || '';
         document.getElementById('roboflowWorkflowId').value = credentials.roboflow_workflow_id || '';
+        
+        // Populate model selection after credentials are loaded
+        this.populateModelSelection();
         
         modal.show();
     }
@@ -4911,20 +5141,28 @@ async ensureMainZonePrompt() {
 
     async transcribeImageById(imageId) {
         const credentials = this.getStoredCredentials();
-        if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+        const provider = this.getActiveProvider();
+        if (!provider) {
             return;
         }
 
         try {
+            const selectedModel = this.getSelectedModel();
             const requestData = {
                 transcription_type: 'full_image',
-                api_endpoint: credentials.openai_api_key ? 'openai' : credentials.custom_endpoint_url,
-                api_model: 'gpt-4o-mini'
+                api_endpoint: selectedModel.provider,
+                api_model: selectedModel.model
             };
 
-            if (credentials.openai_api_key) {
+            if (selectedModel.provider === 'openai') {
                 requestData.openai_api_key = credentials.openai_api_key;
-            } else {
+            } else if (selectedModel.provider === 'vertex') {
+                requestData.vertex_access_token = credentials.vertex_access_token;
+                requestData.vertex_project_id = credentials.vertex_project_id;
+                requestData.vertex_location = credentials.vertex_location;
+                requestData.vertex_model = selectedModel.model;
+            } else if (selectedModel.provider === 'custom') {
+                requestData.custom_endpoint_url = credentials.custom_endpoint_url;
                 requestData.custom_endpoint_auth = credentials.custom_endpoint_auth;
             }
 
@@ -6285,15 +6523,22 @@ async ensureMainZonePrompt() {
 
      async transcribeImageById(imageId, credentials, transcriptionType = 'full_image') {
          try {
+             const selectedModel = this.getSelectedModel();
              const requestData = {
                  transcription_type: transcriptionType,
-                 api_endpoint: credentials.openai_api_key ? 'openai' : credentials.custom_endpoint_url,
-                 api_model: 'gpt-4o-mini'
+                 api_endpoint: selectedModel.provider,
+                 api_model: selectedModel.model
              };
 
-             if (credentials.openai_api_key) {
+             if (selectedModel.provider === 'openai') {
                  requestData.openai_api_key = credentials.openai_api_key;
-             } else {
+             } else if (selectedModel.provider === 'vertex') {
+                 requestData.vertex_access_token = credentials.vertex_access_token;
+                 requestData.vertex_project_id = credentials.vertex_project_id;
+                 requestData.vertex_location = credentials.vertex_location;
+                 requestData.vertex_model = selectedModel.model;
+             } else if (selectedModel.provider === 'custom') {
+                 requestData.custom_endpoint_url = credentials.custom_endpoint_url;
                  requestData.custom_endpoint_auth = credentials.custom_endpoint_auth;
              }
 
@@ -6327,15 +6572,16 @@ async ensureMainZonePrompt() {
              const prompt = this.getPromptForAnnotation(annotation);
              let finalPrompt = prompt.prompt;
              
+             const selectedModel = this.getSelectedModel();
              const requestData = {
                  transcription_type: 'annotation',
-                 api_endpoint: credentials.openai_api_key ? 'openai' : credentials.custom_endpoint_url,
-                 api_model: 'gpt-4o-mini',
+                 api_endpoint: selectedModel.provider,
+                 api_model: selectedModel.model,
                  custom_prompt: finalPrompt,
                  expected_metadata: prompt.metadata_fields || []
              };
 
-             if (credentials.openai_api_key) {
+             if (selectedModel.provider === 'openai') {
                  requestData.openai_api_key = credentials.openai_api_key;
                  // For OpenAI, use structured output if metadata is expected
                  if (prompt.metadata_fields && prompt.metadata_fields.length > 0) {
@@ -6345,7 +6591,19 @@ async ensureMainZonePrompt() {
                      finalPrompt += '\n\nReturn the transcription as plain text. The main text should be clean and readable.';
                      requestData.custom_prompt = finalPrompt;
                  }
-             } else {
+             } else if (selectedModel.provider === 'vertex') {
+                 requestData.vertex_access_token = credentials.vertex_access_token;
+                 requestData.vertex_project_id = credentials.vertex_project_id;
+                 requestData.vertex_location = credentials.vertex_location;
+                 requestData.vertex_model = selectedModel.model;
+                 // For Vertex, modify prompt to request JSON output
+                 if (prompt.metadata_fields && prompt.metadata_fields.length > 0) {
+                     finalPrompt += '\n\nPlease also return metadata in JSON format with the following fields: ' +
+                         prompt.metadata_fields.map(f => `${f.name} (${f.type})`).join(', ') +
+                         '. Return both the transcription and metadata in a JSON object with "text" and "metadata" keys in the following format:\n\n```json\n{"text": "your transcription here", "metadata": {"field1": value1, "field2": value2}}\n```';
+                 }
+                 requestData.custom_prompt = finalPrompt;
+             } else if (selectedModel.provider === 'custom') {
                  // For other models, modify prompt to request JSON output
                  if (prompt.metadata_fields && prompt.metadata_fields.length > 0) {
                      finalPrompt += '\n\nPlease also return metadata in JSON format with the following fields: ' +
@@ -6557,7 +6815,8 @@ async ensureMainZonePrompt() {
         
         // Check credentials first
         const credentials = this.getStoredCredentials();
-        if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+        const provider = this.getActiveProvider();
+        if (!provider) {
             this.showAlert('Please configure your API credentials first', 'warning');
             this.showCredentialsModal();
             return;
