@@ -76,6 +76,21 @@ class UserProfile(models.Model):
     custom_endpoint_url = models.URLField(blank=True, null=True)
     custom_endpoint_set = models.BooleanField(default=False)
     
+    # Roboflow API Configuration
+    roboflow_api_key_set = models.BooleanField(default=False)
+    roboflow_workspace_name = models.CharField(
+        max_length=100, 
+        blank=True, 
+        null=True,
+        help_text="Roboflow workspace name (e.g., 'text-regions')"
+    )
+    roboflow_workflow_id = models.CharField(
+        max_length=100, 
+        blank=True, 
+        null=True,
+        help_text="Roboflow workflow ID (e.g., 'detect-count-and-visualize')"
+    )
+    
     # User preferences
     default_reading_order = models.CharField(
         max_length=30,
@@ -102,6 +117,12 @@ class UserProfile(models.Model):
     custom_prompts = models.JSONField(
         default=list,
         help_text="List of custom prompts with associated zones and metadata fields"
+    )
+    
+    # Custom detection mappings (Roboflow class -> UI classification)
+    custom_detection_mappings = models.JSONField(
+        default=dict,
+        help_text="Custom mappings from detection model classes to UI classifications"
     )
     
     created_at = models.DateTimeField(auto_now_add=True)

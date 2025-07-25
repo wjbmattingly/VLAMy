@@ -3,15 +3,229 @@ import json
 import base64
 import zipfile
 import requests
+import tempfile
+import uuid
+import xml.etree.ElementTree as ET
 from io import BytesIO
 from datetime import datetime
+from xml.dom import minidom
 from PIL import Image as PILImage, ImageDraw
 from django.conf import settings
 from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
 from django.template.loader import render_to_string
 import logging
 
+
 logger = logging.getLogger('ocr_app')
+
+
+class RoboflowDetectionService:
+    """Service for detecting zones and lines using Roboflow API"""
+    
+    def __init__(self, api_key, workspace_name, workflow_id):
+        self.api_key = api_key
+        self.workspace_name = workspace_name
+        self.workflow_id = workflow_id
+        
+        # Initialize the Roboflow client
+        from inference_sdk import InferenceHTTPClient
+        self.client = InferenceHTTPClient(
+            api_url="https://serverless.roboflow.com",
+            api_key=api_key
+        )
+    
+    def detect_zones_lines(self, image_path):
+        """
+        Detect zones and lines in an image using Roboflow API
+        
+        Args:
+            image_path (str): Path to the image file
+            
+        Returns:
+            dict: Detection results with bounding boxes and classifications
+        """
+        try:
+            # Run the workflow using the SDK
+            result = self.client.run_workflow(
+                workspace_name=self.workspace_name,
+                workflow_id=self.workflow_id,
+                images={"image": image_path},
+                use_cache=True  # Cache workflow definition for 15 minutes
+            )
+            
+            # Parse and normalize the results
+            return self._parse_roboflow_results(result)
+            
+        except Exception as e:
+            raise Exception(f"Roboflow detection failed: {str(e)}")
+    
+    def _parse_roboflow_results(self, api_response):
+        """
+        Parse Roboflow API response and convert to our annotation format
+        
+        Args:
+            api_response (dict): Raw API response from Roboflow
+            
+        Returns:
+            dict: Normalized detection results
+        """
+        detections = []
+        
+        # Handle the response format - it might be a list or have nested structure
+        predictions_data = api_response
+        if isinstance(api_response, list) and len(api_response) > 0:
+            predictions_data = api_response[0]
+        
+        if 'predictions' in predictions_data:
+            image_info = predictions_data['predictions'].get('image', {})
+            image_width = image_info.get('width', 0)
+            image_height = image_info.get('height', 0)
+            
+            predictions = predictions_data['predictions'].get('predictions', [])
+            
+            for prediction in predictions:
+                # Extract bounding box coordinates
+                x_center = prediction.get('x', 0)
+                y_center = prediction.get('y', 0)
+                width = prediction.get('width', 0)
+                height = prediction.get('height', 0)
+                
+                # Convert center coordinates to top-left coordinates
+                x = x_center - (width / 2)
+                y = y_center - (height / 2)
+                
+                # Get classification and confidence
+                classification = prediction.get('class', 'Unknown')
+                confidence = prediction.get('confidence', 0)
+                
+                # Determine if it's a zone or line based on aspect ratio and classification
+                aspect_ratio = width / height if height > 0 else 1
+                annotation_type = self._classify_detection_type(classification, aspect_ratio)
+                
+                detection = {
+                    'annotation_type': 'bbox',
+                    'coordinates': {
+                        'x': max(0, x),
+                        'y': max(0, y),
+                        'width': min(width, image_width - x),
+                        'height': min(height, image_height - y)
+                    },
+                    'classification': classification,  # Store original for now, will map in view
+                    'confidence': confidence,
+                    'original_class': classification,
+                    'detection_id': prediction.get('detection_id', str(uuid.uuid4()))
+                }
+                
+                detections.append(detection)
+        
+        return {
+            'detections': detections,
+            'image_info': {
+                'width': image_width,
+                'height': image_height
+            },
+            'total_detections': len(detections)
+        }
+    
+    def _classify_detection_type(self, classification, aspect_ratio):
+        """
+        Determine if detection is a zone or line based on classification and aspect ratio
+        
+        Args:
+            classification (str): Original classification from Roboflow
+            aspect_ratio (float): Width/height ratio
+            
+        Returns:
+            str: 'zone' or 'line'
+        """
+        # Common line indicators
+        line_keywords = ['line', 'row', 'text_line', 'baseline']
+        
+        # Check if classification suggests it's a line
+        if any(keyword in classification.lower() for keyword in line_keywords):
+            return 'line'
+        
+        # Check aspect ratio - lines are typically much wider than tall
+        if aspect_ratio > 3.0:  # More than 3:1 ratio suggests a line
+            return 'line'
+        
+        # Default to zone
+        return 'zone'
+    
+    def _map_classification(self, original_class, detection_type, user_profile=None):
+        """
+        Map Roboflow classification to our ontology
+        
+        Args:
+            original_class (str): Original classification from Roboflow
+            detection_type (str): 'zone' or 'line'
+            user_profile: User profile containing custom mappings and zones
+            
+        Returns:
+            str: Mapped classification for our system
+        """
+        from .models import ZONE_TYPES, LINE_TYPES
+        
+        # First, check for direct matches with our existing zone/line types
+        # Roboflow often returns exact matches like "MainZone", "StampZone", etc.
+        if detection_type == 'zone':
+            zone_values = [code for code, label in ZONE_TYPES]
+            if original_class in zone_values:
+                return original_class
+        else:  # detection_type == 'line'
+            line_values = [code for code, label in LINE_TYPES]
+            if original_class in line_values:
+                return original_class
+        
+        # Second, check user's custom detection mappings
+        if user_profile and user_profile.custom_detection_mappings:
+            custom_mapping = user_profile.custom_detection_mappings.get(original_class)
+            if custom_mapping:
+                return custom_mapping
+        
+        # Third, check if the original class matches any custom zones directly
+        if user_profile and detection_type == 'zone':
+            # Check if user has any custom zones with this value
+            enabled_zones = user_profile.enabled_zone_types or []
+            if original_class in enabled_zones:
+                return original_class
+        
+        # If no direct match, try mapping common alternative names
+        zone_mappings = {
+            'text': 'MainZone',
+            'text_region': 'MainZone',
+            'paragraph': 'MainZone',
+            'title': 'TitlePageZone',
+            'heading': 'MainZone',
+            'table': 'TableZone',
+            'image': 'GraphicZone',
+            'figure': 'GraphicZone',
+            'graphic': 'GraphicZone',
+            'margin': 'MarginTextZone',
+            'footer': 'MarginTextZone',
+            'header': 'MarginTextZone',
+            'page_number': 'NumberingZone',
+            'stamp': 'StampZone',
+            'seal': 'SealZone',
+            'envelope': 'CustomZone',  # Common Roboflow class
+            'postcard': 'CustomZone',  # Common Roboflow class
+        }
+        
+        line_mappings = {
+            'text_line': 'DefaultLine',
+            'line': 'DefaultLine',
+            'heading_line': 'HeadingLine',
+            'title_line': 'HeadingLine',
+        }
+        
+        # Normalize the classification for fallback mapping
+        normalized_class = original_class.lower().replace(' ', '_')
+        
+        if detection_type == 'line':
+            return line_mappings.get(normalized_class, 'DefaultLine')
+        else:
+            return zone_mappings.get(normalized_class, 'CustomZone')
 
 
 class OCRService:

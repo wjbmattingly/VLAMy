@@ -23,8 +23,10 @@ class UserProfileSerializer(serializers.ModelSerializer):
         fields = [
             'user', 'is_approved', 'approval_requested_at', 'approved_by', 
             'approved_at', 'openai_api_key_set', 'custom_endpoint_url', 
-            'custom_endpoint_set', 'default_reading_order', 'enabled_zone_types',
-            'enabled_line_types', 'custom_prompts', 'created_at', 'updated_at'
+            'custom_endpoint_set', 'roboflow_api_key_set', 'roboflow_workspace_name',
+            'roboflow_workflow_id', 'default_reading_order', 'enabled_zone_types',
+            'enabled_line_types', 'custom_prompts', 'custom_detection_mappings', 
+            'created_at', 'updated_at'
         ]
         read_only_fields = [
             'user', 'is_approved', 'approval_requested_at', 'approved_by', 

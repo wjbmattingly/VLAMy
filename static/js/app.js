@@ -49,11 +49,120 @@ class OCRApp {
         this.selectedItems = new Set();
         this.pendingDeleteItems = null;
         
-        // Export tracking
-        this.currentExportJob = null;
-        
-        this.init();
+            // Export tracking
+    this.currentExportJob = null;
+    
+    this.init();
+}
+
+// Debug helper function to diagnose prompt/classification issues
+debugPromptClassifications() {
+    console.group('🔍 Prompt & Classification Debug Info');
+    
+    // Show all available zone types
+    console.log('📝 Available Zone Types:');
+    if (this.annotationTypes) {
+        this.annotationTypes.all_types.zones.forEach(zone => {
+            console.log(`  • ${zone.label} (value: "${zone.value}")`);
+        });
     }
+    
+    // Show custom zones
+    if (this.customZones.length > 0) {
+        console.log('🎨 Custom Zones:');
+        this.customZones.forEach(zone => {
+            console.log(`  • ${zone.label} (value: "${zone.value}")`);
+        });
+    }
+    
+    // Show current prompts and their zones
+    console.log('💬 Current Prompts:');
+    this.customPrompts.forEach(prompt => {
+        console.log(`  • "${prompt.name}": zones [${prompt.zones.join(', ')}]`);
+    });
+    
+    // Show current annotations and their classifications
+    if (this.annotations.length > 0) {
+        console.log('📍 Current Annotations:');
+        this.annotations.forEach((ann, i) => {
+            const prompt = this.getPromptForAnnotation(ann);
+            console.log(`  • Annotation ${i+1}: classification "${ann.classification}" → prompt "${prompt.name || 'default'}"`);
+        });
+    }
+    
+    // Show detection mappings
+    if (this.currentUser && this.currentUser.custom_detection_mappings) {
+        console.log('🔄 Detection Mappings:');
+        Object.entries(this.currentUser.custom_detection_mappings).forEach(([from, to]) => {
+            console.log(`  • "${from}" → "${to}"`);
+        });
+    }
+    
+    console.groupEnd();
+}
+
+// Helper function to ensure prompts include main zone types
+async ensureMainZonePrompt() {
+    if (!this.annotationTypes || !this.customPrompts) return;
+    
+    // Find the main zone type value
+    const mainZoneType = this.annotationTypes.all_types.zones.find(z => 
+        z.label.toLowerCase().includes('main') || z.value.toLowerCase().includes('main')
+    );
+    
+    if (!mainZoneType) {
+        console.log('No main zone type found in annotation types');
+        return;
+    }
+    
+    // Check if any prompt includes the main zone
+    const hasMainZonePrompt = this.customPrompts.some(prompt => 
+        prompt.zones && prompt.zones.includes(mainZoneType.value)
+    );
+    
+    if (!hasMainZonePrompt) {
+        console.log(`Creating default prompt for Main Zone (${mainZoneType.value})`);
+        
+        // Create a default prompt for Main Zone
+        const mainZonePrompt = {
+            id: 'main_zone_default_' + Date.now(),
+            name: 'Main Zone Default',
+            prompt: 'Transcribe this text accurately, preserving formatting and structure.',
+            zones: [mainZoneType.value],
+            metadata_fields: [
+                { name: 'handwritten', type: 'boolean', default: false },
+                { name: 'typed', type: 'boolean', default: true },
+                { name: 'language', type: 'string', default: 'en' }
+            ],
+            is_default: false
+        };
+        
+        const updatedPrompts = [...this.customPrompts, mainZonePrompt];
+        
+        try {
+            // Save to backend
+            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: JSON.stringify({
+                    custom_prompts: updatedPrompts
+                })
+            });
+            
+            if (response.ok) {
+                this.customPrompts = updatedPrompts;
+                this.populatePromptsList();
+                console.log('✅ Main Zone prompt created successfully');
+                this.showAlert('Main Zone prompt created automatically', 'info');
+            }
+        } catch (error) {
+            console.error('Error creating main zone prompt:', error);
+        }
+    }
+}
 
     async init() {
         this.setupEventListeners();
@@ -180,6 +289,11 @@ class OCRApp {
             this.initializeDefaultColors();
             this.updateCredentialsStatus();
             this.populatePromptsList();
+            
+            // Ensure main zone prompt exists after loading annotation types
+            if (this.annotationTypes) {
+                await this.ensureMainZonePrompt();
+            }
         } else {
             throw new Error('Failed to load user profile');
         }
@@ -200,6 +314,11 @@ class OCRApp {
                 this.initializeDefaultColors();
                 this.populateClassificationSelector();
                 this.populateAnnotationTypesChecklist();
+                
+                // Ensure main zone prompt exists after annotation types are loaded
+                if (this.currentUser) {
+                    await this.ensureMainZonePrompt();
+                }
             } else {
                 console.error('Failed to load annotation types');
             }
@@ -700,6 +819,48 @@ class OCRApp {
         return `rgba(${r}, ${g}, ${b}, ${alpha})`;
     }
 
+    formatClassificationName(classification) {
+        if (!classification) return '';
+        
+        // Convert camelCase/PascalCase to readable format
+        // MainZone -> Main Zone, StampZone -> Stamp Zone, etc.
+        return classification
+            .replace(/([A-Z])/g, ' $1') // Add space before capital letters
+            .replace(/^Zone$/, 'Zone') // Keep standalone "Zone" as is
+            .replace(/^Line$/, 'Line') // Keep standalone "Line" as is
+            .trim(); // Remove leading space
+    }
+
+    canvasToImageCoordinates(canvasCoords) {
+        if (!this.imageTransform) return canvasCoords;
+        
+        const scale = this.imageTransform.scale;
+        const left = this.imageTransform.left;
+        const top = this.imageTransform.top;
+        
+        return {
+            x: (canvasCoords.x - left) / scale,
+            y: (canvasCoords.y - top) / scale,
+            width: canvasCoords.width / scale,
+            height: canvasCoords.height / scale
+        };
+    }
+
+    imageToCanvasCoordinates(imageCoords) {
+        if (!this.imageTransform) return imageCoords;
+        
+        const scale = this.imageTransform.scale;
+        const left = this.imageTransform.left;
+        const top = this.imageTransform.top;
+        
+        return {
+            x: (imageCoords.x * scale) + left,
+            y: (imageCoords.y * scale) + top,
+            width: imageCoords.width * scale,
+            height: imageCoords.height * scale
+        };
+    }
+
     showAddCustomZoneModal() {
         // Create modal HTML if it doesn't exist
         let modal = document.getElementById('addCustomZoneModal');
@@ -1037,6 +1198,9 @@ class OCRApp {
             console.error('Error saving annotation:', error);
             this.showAlert('Error saving annotation', 'warning');
         }
+        
+        // Refresh canvas to ensure proper interaction with the new annotation
+        this.canvas.renderAll();
     }
 
     getAnnotationCoordinates(fabricObject, type) {
@@ -1227,7 +1391,45 @@ class OCRApp {
                 <i class="fas fa-caret-right tree-toggle"></i>
                 <i class="fas fa-folder tree-icon"></i>
                 <span class="tree-text">${project.name}</span>
-                <div class="tree-actions">
+                <div class="tree-actions level-actions">
+                    <div class="level-action-dropdown">
+                        <button class="btn btn-sm btn-detect" onclick="event.stopPropagation(); app.showProjectDetectMenu('${project.id}', this)" title="Detect Zones/Lines">
+                            <i class="fas fa-search-location"></i>
+                        </button>
+                        <div class="level-action-menu" id="project-detect-menu-${project.id}">
+                            <div class="level-action-menu-item" onclick="app.detectProjectZones('${project.id}', 'unannotated')">
+                                <h6>Detect on Unannotated Pages</h6>
+                                <p>Only detect zones/lines on pages without existing annotations</p>
+                            </div>
+                            <div class="level-action-menu-item warning" onclick="app.detectProjectZones('${project.id}', 'all')">
+                                <h6>Detect on All Pages</h6>
+                                <p>⚠️ This will remove existing zones and transcriptions</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="level-action-dropdown">
+                        <button class="btn btn-sm btn-transcribe" onclick="event.stopPropagation(); app.showProjectTranscribeMenu('${project.id}', this)" title="Transcribe">
+                            <i class="fas fa-robot"></i>
+                        </button>
+                        <div class="level-action-menu" id="project-transcribe-menu-${project.id}">
+                            <div class="level-action-menu-item" onclick="app.transcribeProject('${project.id}', 'full_image')">
+                                <h6>Transcribe Full Images</h6>
+                                <p>Transcribe entire images without zone detection</p>
+                            </div>
+                            <div class="level-action-menu-item" onclick="app.transcribeProject('${project.id}', 'zones_only')">
+                                <h6>Transcribe Zones/Lines Only</h6>
+                                <p>Transcribe detected zones and lines (detection required first)</p>
+                            </div>
+                            <div class="level-action-menu-item" onclick="app.transcribeProject('${project.id}', 'untranscribed_images')">
+                                <h6>Untranscribed Images Only</h6>
+                                <p>Only transcribe images without existing transcriptions</p>
+                            </div>
+                            <div class="level-action-menu-item" onclick="app.transcribeProject('${project.id}', 'untranscribed_zones')">
+                                <h6>Untranscribed Zones Only</h6>
+                                <p>Only transcribe zones/lines without existing transcriptions</p>
+                            </div>
+                        </div>
+                    </div>
                     <button class="btn btn-sm btn-outline-primary" onclick="event.stopPropagation(); app.showCreateDocumentModal('${project.id}')" title="Add Document">
                         <i class="fas fa-file-plus"></i>
                     </button>
@@ -1311,12 +1513,54 @@ class OCRApp {
         documentDiv.className = 'tree-item document-item ms-3';
         documentDiv.dataset.documentId = docItem.id;
         
+        // Generate status icons
+        const statusIcons = this.generateDocumentStatusIcons(docItem);
+        
         documentDiv.innerHTML = `
             <div class="tree-item-content" onclick="app.toggleDocument('${docItem.id}')">
                 <i class="fas fa-caret-right tree-toggle"></i>
                 <i class="fas fa-file-alt tree-icon"></i>
                 <span class="tree-text">${docItem.name}</span>
-                <div class="tree-actions">
+                <div class="document-status-icons">${statusIcons}</div>
+                <div class="tree-actions level-actions">
+                    <div class="level-action-dropdown">
+                        <button class="btn btn-sm btn-detect" onclick="event.stopPropagation(); app.showDocumentDetectMenu('${docItem.id}', this)" title="Detect Zones/Lines">
+                            <i class="fas fa-search-location"></i>
+                        </button>
+                        <div class="level-action-menu" id="document-detect-menu-${docItem.id}">
+                            <div class="level-action-menu-item" onclick="app.detectDocumentZones('${docItem.id}', 'unannotated')">
+                                <h6>Detect on Unannotated Pages</h6>
+                                <p>Only detect zones/lines on pages without existing annotations</p>
+                            </div>
+                            <div class="level-action-menu-item warning" onclick="app.detectDocumentZones('${docItem.id}', 'all')">
+                                <h6>Detect on All Pages</h6>
+                                <p>⚠️ This will remove existing zones and transcriptions</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="level-action-dropdown">
+                        <button class="btn btn-sm btn-transcribe" onclick="event.stopPropagation(); app.showDocumentTranscribeMenu('${docItem.id}', this)" title="Transcribe">
+                            <i class="fas fa-robot"></i>
+                        </button>
+                        <div class="level-action-menu" id="document-transcribe-menu-${docItem.id}">
+                            <div class="level-action-menu-item" onclick="app.transcribeDocument('${docItem.id}', 'full_image')">
+                                <h6>Transcribe Full Images</h6>
+                                <p>Transcribe entire images without zone detection</p>
+                            </div>
+                            <div class="level-action-menu-item" onclick="app.transcribeDocument('${docItem.id}', 'zones_only')">
+                                <h6>Transcribe Zones/Lines Only</h6>
+                                <p>Transcribe detected zones and lines (detection required first)</p>
+                            </div>
+                            <div class="level-action-menu-item" onclick="app.transcribeDocument('${docItem.id}', 'untranscribed_images')">
+                                <h6>Untranscribed Images Only</h6>
+                                <p>Only transcribe images without existing transcriptions</p>
+                            </div>
+                            <div class="level-action-menu-item" onclick="app.transcribeDocument('${docItem.id}', 'untranscribed_zones')">
+                                <h6>Untranscribed Zones Only</h6>
+                                <p>Only transcribe zones/lines without existing transcriptions</p>
+                            </div>
+                        </div>
+                    </div>
                     <button class="btn btn-sm btn-outline-success" onclick="event.stopPropagation(); app.showUploadImageModal('${docItem.id}')" title="Add Images">
                         <i class="fas fa-image"></i>
                     </button>
@@ -1329,6 +1573,24 @@ class OCRApp {
         `;
         
         return documentDiv;
+    }
+
+    generateDocumentStatusIcons(docItem) {
+        let icons = '';
+        
+        // Check if document has zone detection
+        if (docItem.has_zone_detection) {
+            icons += '<div class="status-icon zones-detected" data-tooltip="Has zone detection"><i class="fas fa-search-location"></i></div>';
+        }
+        
+        // Check if document has transcriptions
+        if (docItem.has_transcriptions === 'full') {
+            icons += '<div class="status-icon transcribed" data-tooltip="Fully transcribed"><i class="fas fa-check"></i></div>';
+        } else if (docItem.has_transcriptions === 'partial') {
+            icons += '<div class="status-icon partial" data-tooltip="Partially transcribed"><i class="fas fa-check-circle"></i></div>';
+        }
+        
+        return icons;
     }
 
     async toggleDocument(documentId) {
@@ -1556,6 +1818,15 @@ class OCRApp {
             prompt.zones && prompt.zones.includes(annotation.classification)
         );
 
+        // Debug: Log prompt matching for troubleshooting
+        if (!applicablePrompt && annotation.classification) {
+            console.log(`No prompt found for classification: "${annotation.classification}"`);
+            console.log('Available prompts and their zones:', this.customPrompts.map(p => ({
+                name: p.name,
+                zones: p.zones
+            })));
+        }
+
         return applicablePrompt || this.getDefaultPrompt();
     }
 
@@ -1668,6 +1939,9 @@ class OCRApp {
         
         // Update the UI
         this.updateAnnotationsList();
+        
+        // Refresh canvas to reflect any visual changes from transcription
+        this.canvas.renderAll();
     }
     
     processTranscriptionResponse(transcription) {
@@ -1899,7 +2173,7 @@ class OCRApp {
                                                   style="cursor: pointer; background-color: ${classificationColor} !important; color: white;" 
                                                   title="Click to change classification"
                                                   id="classification-display-${annotation.id}">
-                                                ${annotation.classification || 'NoZoneSelected'}
+                                                ${annotation.classification || 'No Zone Selected'}
                                             </span>
                                         </div>
                                         <div class="btn-group" role="group">
@@ -3088,7 +3362,10 @@ class OCRApp {
         return {
             openai_api_key: localStorage.getItem('openai_api_key'),
             custom_endpoint_url: localStorage.getItem('custom_endpoint_url'),
-            custom_endpoint_auth: localStorage.getItem('custom_endpoint_auth')
+            custom_endpoint_auth: localStorage.getItem('custom_endpoint_auth'),
+            roboflow_api_key: localStorage.getItem('roboflow_api_key'),
+            roboflow_workspace_name: localStorage.getItem('roboflow_workspace_name'),
+            roboflow_workflow_id: localStorage.getItem('roboflow_workflow_id')
         };
     }
 
@@ -3096,6 +3373,9 @@ class OCRApp {
         const openaiKey = document.getElementById('openaiApiKey').value;
         const customEndpoint = document.getElementById('customEndpoint').value;
         const customAuth = document.getElementById('customAuth').value;
+        const roboflowKey = document.getElementById('roboflowApiKey').value;
+        const roboflowWorkspace = document.getElementById('roboflowWorkspace').value;
+        const roboflowWorkflowId = document.getElementById('roboflowWorkflowId').value;
 
         if (openaiKey) {
             localStorage.setItem('openai_api_key', openaiKey);
@@ -3115,7 +3395,26 @@ class OCRApp {
             localStorage.removeItem('custom_endpoint_auth');
         }
 
+        if (roboflowKey) {
+            localStorage.setItem('roboflow_api_key', roboflowKey);
+        } else {
+            localStorage.removeItem('roboflow_api_key');
+        }
+
+        if (roboflowWorkspace) {
+            localStorage.setItem('roboflow_workspace_name', roboflowWorkspace);
+        } else {
+            localStorage.removeItem('roboflow_workspace_name');
+        }
+
+        if (roboflowWorkflowId) {
+            localStorage.setItem('roboflow_workflow_id', roboflowWorkflowId);
+        } else {
+            localStorage.removeItem('roboflow_workflow_id');
+        }
+
         this.updateCredentialsStatus();
+        this.updateRoboflowProfileSettings(roboflowKey, roboflowWorkspace, roboflowWorkflowId);
         bootstrap.Modal.getInstance(document.getElementById('credentialsModal')).hide();
         this.showAlert('Credentials saved successfully', 'success');
     }
@@ -3141,6 +3440,9 @@ class OCRApp {
         document.getElementById('openaiApiKey').value = credentials.openai_api_key || '';
         document.getElementById('customEndpoint').value = credentials.custom_endpoint_url || '';
         document.getElementById('customAuth').value = credentials.custom_endpoint_auth || '';
+        document.getElementById('roboflowApiKey').value = credentials.roboflow_api_key || '';
+        document.getElementById('roboflowWorkspace').value = credentials.roboflow_workspace_name || '';
+        document.getElementById('roboflowWorkflowId').value = credentials.roboflow_workflow_id || '';
         
         modal.show();
     }
@@ -3148,103 +3450,16 @@ class OCRApp {
 
 
     // Legacy Annotation Editing (replaced by inline editing)
-    // editAnnotation(annotationId) {
-    //     const annotation = this.annotations.find(a => a.id === annotationId);
-    //     if (!annotation) return;
-
-    //     this.currentEditingAnnotation = annotation;
-    //     this.populateEditAnnotationModal(annotation);
+    openAnnotationEditor(annotation) {
+        this.currentEditingAnnotation = annotation;
         
-    //     const modal = new bootstrap.Modal(document.getElementById('editAnnotationModal'));
-    //     modal.show();
-    // }
-
-    populateEditAnnotationModal(annotation) {
-        // Populate classification dropdown
-        const classificationSelect = document.getElementById('editAnnotationClassification');
-        classificationSelect.innerHTML = '<option value="">No classification</option>';
-        
-        if (this.annotationTypes) {
-            // Add zone types
-            if (this.userEnabledTypes.zones && this.userEnabledTypes.zones.length > 0) {
-                const zoneGroup = document.createElement('optgroup');
-                zoneGroup.label = 'Zone Types';
-                
-                this.userEnabledTypes.zones.forEach(zoneCode => {
-                    const zoneType = this.annotationTypes.all_types.zones.find(z => z.value === zoneCode);
-                    if (zoneType) {
-                        const option = document.createElement('option');
-                        option.value = zoneType.value;
-                        option.textContent = zoneType.label;
-                        zoneGroup.appendChild(option);
-                    }
-                });
-                
-                if (zoneGroup.children.length > 0) {
-                    classificationSelect.appendChild(zoneGroup);
-                }
-            }
-            
-            // Add line types
-            if (this.userEnabledTypes.lines && this.userEnabledTypes.lines.length > 0) {
-                const lineGroup = document.createElement('optgroup');
-                lineGroup.label = 'Line Types';
-                
-                this.userEnabledTypes.lines.forEach(lineCode => {
-                    const lineType = this.annotationTypes.all_types.lines.find(l => l.value === lineCode);
-                    if (lineType) {
-                        const option = document.createElement('option');
-                        option.value = lineType.value;
-                        option.textContent = lineType.label;
-                        lineGroup.appendChild(option);
-                    }
-                });
-                
-                if (lineGroup.children.length > 0) {
-                    classificationSelect.appendChild(lineGroup);
-                }
-            }
-        }
-
-        // Set current values
-        classificationSelect.value = annotation.classification || '';
+        // Populate form
+        document.getElementById('editAnnotationClassification').value = annotation.classification || '';
         document.getElementById('editAnnotationLabel').value = annotation.label || '';
         
-        // Populate metadata fields
-        this.populateEditAnnotationMetadata(annotation);
-    }
-
-    populateEditAnnotationMetadata(annotation) {
-        const container = document.getElementById('editAnnotationMetadata');
-        container.innerHTML = '';
-        
-        // Get metadata template based on classification
-        let metadataFields = this.getMetadataFieldsForClassification(annotation.classification);
-        
-        // If annotation has existing metadata that's not in the template, add it as "unparsed"
-        if (annotation.metadata && typeof annotation.metadata === 'object') {
-            const existingKeys = Object.keys(annotation.metadata);
-            const templateKeys = metadataFields.map(f => f.name);
-            
-            existingKeys.forEach(key => {
-                if (!templateKeys.includes(key)) {
-                    metadataFields.push({
-                        name: key,
-                        type: 'string',
-                        default: 'unparsed'
-                    });
-                }
-            });
-        }
-        
-        metadataFields.forEach(field => {
-            const currentValue = annotation.metadata && annotation.metadata[field.name] !== undefined
-                ? annotation.metadata[field.name] 
-                : field.default;
-                
-            const fieldHtml = this.createMetadataFieldHtml(field, currentValue, 'edit');
-            container.insertAdjacentHTML('beforeend', fieldHtml);
-        });
+        // Show modal
+        const modal = new bootstrap.Modal(document.getElementById('editAnnotationModal'));
+        modal.show();
     }
 
     getMetadataFieldsForClassification(classification) {
@@ -3254,7 +3469,7 @@ class OCRApp {
         );
         
         if (applicablePrompt && applicablePrompt.metadata_fields) {
-            return applicablePrompt.metadata_fields;
+            return [...applicablePrompt.metadata_fields]; // Return a copy
         }
         
         // Default metadata fields
@@ -3265,125 +3480,530 @@ class OCRApp {
         ];
     }
 
-    createMetadataFieldHtml(field, value, prefix) {
-        const fieldId = `${prefix}_${field.name}`;
-        const displayName = field.name.charAt(0).toUpperCase() + field.name.slice(1).replace(/_/g, ' ');
-        const isUnparsed = field.default === 'unparsed' || (typeof value === 'object' && value !== null);
+    // Detection Mapper Functions
+    toggleDetectionMapper() {
+        const content = document.getElementById('detectionMapperContent');
+        const chevron = document.getElementById('mapperChevron');
         
-        let inputHtml = '';
-        switch (field.type) {
-            case 'boolean':
-                inputHtml = `
-                    <div class="form-check annotation-metadata-field">
-                        <input class="form-check-input" type="checkbox" id="${fieldId}" 
-                               ${value ? 'checked' : ''}>
-                        <label class="form-check-label" for="${fieldId}">
-                            ${displayName}
-                            ${isUnparsed ? '<span class="badge bg-warning ms-1">unparsed</span>' : ''}
-                        </label>
-                    </div>
-                `;
-                break;
-            case 'string':
-                inputHtml = `
-                    <div class="annotation-metadata-field mb-2">
-                        <label for="${fieldId}" class="form-label">
-                            ${displayName}
-                            ${isUnparsed ? '<span class="badge bg-warning ms-1">unparsed</span>' : ''}
-                        </label>
-                        <input type="text" class="form-control form-control-sm" 
-                               id="${fieldId}" value="${isUnparsed && typeof value === 'object' ? 'unparsed' : (value || '')}">
-                    </div>
-                `;
-                break;
-            case 'number':
-                inputHtml = `
-                    <div class="annotation-metadata-field mb-2">
-                        <label for="${fieldId}" class="form-label">
-                            ${displayName}
-                            ${isUnparsed ? '<span class="badge bg-warning ms-1">unparsed</span>' : ''}
-                        </label>
-                        <input type="number" class="form-control form-control-sm" 
-                               id="${fieldId}" value="${value || ''}">
-                    </div>
-                `;
-                break;
+        if (content.style.display === 'none') {
+            content.style.display = 'block';
+            chevron.className = 'fas fa-chevron-up';
+            this.loadDetectionMappings();
+            this.populateMappingTargetDropdown();
+        } else {
+            content.style.display = 'none';
+            chevron.className = 'fas fa-chevron-down';
         }
-        
-        return inputHtml;
     }
 
-    async saveAnnotationEdit() {
-        if (!this.currentEditingAnnotation) return;
+    loadDetectionMappings() {
+        if (!this.currentUser) return;
+        
+        // Ensure the field exists
+        if (!this.currentUser.custom_detection_mappings) {
+            this.currentUser.custom_detection_mappings = {};
+        }
+        
+        const mappings = this.currentUser.custom_detection_mappings;
+        const container = document.getElementById('detectionMappingsList');
+        
+        container.innerHTML = '';
+        
+        Object.entries(mappings).forEach(([detectionClass, mappedClass]) => {
+            const mappingDiv = document.createElement('div');
+            mappingDiv.className = 'd-flex align-items-center justify-content-between mb-1 p-1 bg-light rounded';
+            mappingDiv.innerHTML = `
+                <small class="text-truncate me-2">
+                    <strong>${detectionClass}</strong> → ${this.formatClassificationName(mappedClass)}
+                </small>
+                <button class="btn btn-xs btn-outline-danger" onclick="app.removeDetectionMapping('${detectionClass}')" title="Remove mapping">
+                    <i class="fas fa-times"></i>
+                </button>
+            `;
+            container.appendChild(mappingDiv);
+        });
+        
+        if (Object.keys(mappings).length === 0) {
+            container.innerHTML = '<small class="text-muted">No custom mappings yet</small>';
+        }
+    }
 
-        const classification = document.getElementById('editAnnotationClassification').value || null;
-        const label = document.getElementById('editAnnotationLabel').value || '';
+    populateMappingTargetDropdown() {
+        const dropdown = document.getElementById('newMappingTarget');
+        dropdown.innerHTML = '<option value="">Select zone...</option>';
         
-        // Collect metadata from all fields in the form
-        const metadata = {};
+        if (!this.annotationTypes || !this.userEnabledTypes) return;
         
-        // Get the metadata fields container and all field inputs
-        const metadataContainer = document.getElementById('editAnnotationMetadata');
-        const metadataInputs = metadataContainer.querySelectorAll('input, select, textarea');
-        
-        metadataInputs.forEach(input => {
-            const fieldName = input.id.replace('edit_', '');
-            if (fieldName && input.id.startsWith('edit_')) {
-                if (input.type === 'checkbox') {
-                    metadata[fieldName] = input.checked;
-                } else if (input.type === 'number') {
-                    const numValue = parseFloat(input.value);
-                    metadata[fieldName] = isNaN(numValue) ? 0 : numValue;
-                } else {
-                    const value = input.value.trim();
-                    if (value !== '') {
-                        metadata[fieldName] = value;
-                    }
+        // Add built-in zone types
+        if (this.userEnabledTypes.zones) {
+            const zoneGroup = document.createElement('optgroup');
+            zoneGroup.label = 'Zone Types';
+            
+            this.userEnabledTypes.zones.forEach(zoneCode => {
+                const zoneType = this.annotationTypes.all_types.zones.find(z => z.value === zoneCode);
+                if (zoneType) {
+                    const option = document.createElement('option');
+                    option.value = zoneType.value;
+                    option.textContent = zoneType.label;
+                    zoneGroup.appendChild(option);
                 }
+            });
+            
+            if (zoneGroup.children.length > 0) {
+                dropdown.appendChild(zoneGroup);
+            }
+        }
+        
+        // Add custom zones
+        if (this.customZones && this.customZones.length > 0) {
+            const customGroup = document.createElement('optgroup');
+            customGroup.label = 'Custom Zones';
+            
+            this.customZones.forEach(customZone => {
+                if (this.userEnabledTypes.zones.includes(customZone.value)) {
+                    const option = document.createElement('option');
+                    option.value = customZone.value;
+                    option.textContent = customZone.label;
+                    customGroup.appendChild(option);
+                }
+            });
+            
+            if (customGroup.children.length > 0) {
+                dropdown.appendChild(customGroup);
+            }
+        }
+        
+        // Add line types
+        if (this.userEnabledTypes.lines) {
+            const lineGroup = document.createElement('optgroup');
+            lineGroup.label = 'Line Types';
+            
+            this.userEnabledTypes.lines.forEach(lineCode => {
+                const lineType = this.annotationTypes.all_types.lines.find(l => l.value === lineCode);
+                if (lineType) {
+                    const option = document.createElement('option');
+                    option.value = lineType.value;
+                    option.textContent = lineType.label;
+                    lineGroup.appendChild(option);
+                }
+            });
+            
+            if (lineGroup.children.length > 0) {
+                dropdown.appendChild(lineGroup);
+            }
+        }
+    }
+
+    async addDetectionMapping() {
+        const detectionClass = document.getElementById('newDetectionClass').value.trim();
+        const mappingTarget = document.getElementById('newMappingTarget').value;
+        
+        if (!detectionClass || !mappingTarget) {
+            this.showAlert('Please enter both detection class and target zone', 'warning');
+            return;
+        }
+        
+        // Ensure user profile exists
+        if (!this.currentUser) {
+            this.showAlert('User profile not loaded', 'danger');
+            return;
+        }
+        
+        // Update local copy
+        if (!this.currentUser.custom_detection_mappings) {
+            this.currentUser.custom_detection_mappings = {};
+        }
+        this.currentUser.custom_detection_mappings[detectionClass] = mappingTarget;
+        
+        // Save to backend
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                method: 'PATCH',
+                headers: {
+                    'Authorization': `Token ${this.authToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    custom_detection_mappings: this.currentUser.custom_detection_mappings
+                })
+            });
+            
+            if (response.ok) {
+                // Update current user profile with response
+                const updatedProfile = await response.json();
+                this.currentUser = updatedProfile;
+                
+                // Clear inputs
+                document.getElementById('newDetectionClass').value = '';
+                document.getElementById('newMappingTarget').value = '';
+                
+                // Reload mappings display
+                this.loadDetectionMappings();
+                this.showAlert('Detection mapping added successfully', 'success');
+            } else {
+                throw new Error('Failed to save mapping');
+            }
+        } catch (error) {
+            console.error('Error saving detection mapping:', error);
+            this.showAlert('Failed to save detection mapping', 'danger');
+        }
+    }
+
+    async removeDetectionMapping(detectionClass) {
+        if (!this.currentUser || !this.currentUser.custom_detection_mappings) return;
+        
+        // Remove from local copy
+        delete this.currentUser.custom_detection_mappings[detectionClass];
+        
+        // Save to backend
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                method: 'PATCH',
+                headers: {
+                    'Authorization': `Token ${this.authToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    custom_detection_mappings: this.currentUser.custom_detection_mappings
+                })
+            });
+            
+            if (response.ok) {
+                // Update current user profile with response
+                const updatedProfile = await response.json();
+                this.currentUser = updatedProfile;
+                
+                this.loadDetectionMappings();
+                this.showAlert('Detection mapping removed', 'success');
+            } else {
+                throw new Error('Failed to remove mapping');
+            }
+        } catch (error) {
+            console.error('Error removing detection mapping:', error);
+            this.showAlert('Failed to remove detection mapping', 'danger');
+        }
+    }
+
+    // Roboflow Zone/Line Detection Methods
+    updateRoboflowProfileSettings(apiKey, workspaceName, workflowId) {
+        // Update the user profile with Roboflow settings status
+        const profileData = {
+            roboflow_api_key_set: !!apiKey,
+            roboflow_workspace_name: workspaceName || '',
+            roboflow_workflow_id: workflowId || ''
+        };
+
+        fetch(`${this.apiBaseUrl}/auth/profile/`, {
+            method: 'PATCH',
+            headers: {
+                'Authorization': `Token ${this.authToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(profileData)
+        }).catch(error => {
+            console.error('Failed to update Roboflow profile settings:', error);
+        });
+    }
+
+    showDetectZonesLinesModal() {
+        if (!this.currentImage) {
+            this.showAlert('Please select an image first', 'warning');
+            return;
+        }
+
+        // Check if Roboflow credentials are configured
+        const credentials = this.getStoredCredentials();
+        if (!credentials.roboflow_api_key || !credentials.roboflow_workspace_name || !credentials.roboflow_workflow_id) {
+            this.showAlert('Please configure Roboflow API settings in the credentials modal first', 'warning');
+            return;
+        }
+
+        // Populate zone/line type options
+        this.populateDetectionTypeOptions();
+
+        // Set up event listeners for the filter checkbox
+        const filterCheckbox = document.getElementById('filterSelectedTypes');
+        const filterOptions = document.getElementById('detectionFilterOptions');
+        
+        filterCheckbox.addEventListener('change', function() {
+            filterOptions.style.display = this.checked ? 'block' : 'none';
+        });
+
+        // Reset modal state
+        document.getElementById('detectionProgress').style.display = 'none';
+        document.getElementById('detectionResults').style.display = 'none';
+        filterCheckbox.checked = false;
+        filterOptions.style.display = 'none';
+
+        // Show modal
+        const modal = new bootstrap.Modal(document.getElementById('detectZonesLinesModal'));
+        modal.show();
+    }
+
+    populateDetectionTypeOptions() {
+        if (!this.annotationTypes || !this.userEnabledTypes) return;
+
+        const zoneContainer = document.getElementById('detectionZoneTypes');
+        const lineContainer = document.getElementById('detectionLineTypes');
+
+        // Clear existing options
+        zoneContainer.innerHTML = '';
+        lineContainer.innerHTML = '';
+
+        // Add zone type checkboxes
+        this.annotationTypes.all_types.zones.forEach(zoneType => {
+            if (this.userEnabledTypes.zones.includes(zoneType.value)) {
+                const checkbox = this.createDetectionTypeCheckbox(zoneType, 'zone');
+                zoneContainer.appendChild(checkbox);
             }
         });
 
+        // Add line type checkboxes
+        this.annotationTypes.all_types.lines.forEach(lineType => {
+            if (this.userEnabledTypes.lines.includes(lineType.value)) {
+                const checkbox = this.createDetectionTypeCheckbox(lineType, 'line');
+                lineContainer.appendChild(checkbox);
+            }
+        });
+    }
 
+    createDetectionTypeCheckbox(typeInfo, category) {
+        const div = document.createElement('div');
+        div.className = 'form-check';
+
+        const checkbox = document.createElement('input');
+        checkbox.className = 'form-check-input';
+        checkbox.type = 'checkbox';
+        checkbox.id = `detection_${category}_${typeInfo.value}`;
+        checkbox.value = typeInfo.value;
+        checkbox.checked = true; // Default to checked
+
+        const label = document.createElement('label');
+        label.className = 'form-check-label';
+        label.setAttribute('for', checkbox.id);
+        label.textContent = typeInfo.label;
+
+        div.appendChild(checkbox);
+        div.appendChild(label);
+
+        return div;
+    }
+
+    async startZoneLineDetection() {
+        if (!this.currentImage) {
+            this.showAlert('No image selected', 'error');
+            return;
+        }
+
+        const credentials = this.getStoredCredentials();
+        const filterSelected = document.getElementById('filterSelectedTypes').checked;
+        
+        // Collect selected types if filtering is enabled
+        let selectedZoneTypes = [];
+        let selectedLineTypes = [];
+        
+        if (filterSelected) {
+            const zoneCheckboxes = document.querySelectorAll('#detectionZoneTypes input[type="checkbox"]:checked');
+            const lineCheckboxes = document.querySelectorAll('#detectionLineTypes input[type="checkbox"]:checked');
+            
+            selectedZoneTypes = Array.from(zoneCheckboxes).map(cb => cb.value);
+            selectedLineTypes = Array.from(lineCheckboxes).map(cb => cb.value);
+            
+            if (selectedZoneTypes.length === 0 && selectedLineTypes.length === 0) {
+                this.showAlert('Please select at least one zone or line type to detect', 'warning');
+                return;
+            }
+        }
+
+        // Show progress
+        document.getElementById('detectionProgress').style.display = 'block';
+        document.getElementById('detectionResults').style.display = 'none';
+        document.getElementById('startDetectionBtn').disabled = true;
 
         try {
-            this.showLoading(true);
-
-            const response = await fetch(`${this.apiBaseUrl}/annotations/${this.currentEditingAnnotation.id}/`, {
-                method: 'PATCH',
+            const response = await fetch(`${this.apiBaseUrl}/images/${this.currentImage.id}/detect-zones-lines/`, {
+                method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
+                    'Authorization': `Token ${this.authToken}`,
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    classification: classification,
-                    label: label,
-                    metadata: metadata
+                    roboflow_api_key: credentials.roboflow_api_key,
+                    filter_selected_types: filterSelected,
+                    selected_zone_types: selectedZoneTypes,
+                    selected_line_types: selectedLineTypes
                 })
             });
 
+            const result = await response.json();
+
             if (response.ok) {
-                const updatedAnnotation = await response.json();
+                // Hide progress and show results
+                document.getElementById('detectionProgress').style.display = 'none';
+                document.getElementById('detectionResults').style.display = 'block';
                 
-                // Update local annotation
-                this.currentEditingAnnotation.classification = updatedAnnotation.classification;
-                this.currentEditingAnnotation.label = updatedAnnotation.label;
-                this.currentEditingAnnotation.metadata = updatedAnnotation.metadata;
-                
-                // Update UI
-                this.updateCombinedTranscription();
-                
-                // Hide modal and show success
-                bootstrap.Modal.getInstance(document.getElementById('editAnnotationModal')).hide();
-                this.showAlert('Annotation updated successfully!', 'success');
+                const detections = result.detections.detections;
+                document.getElementById('detectionResultsText').textContent = 
+                    `Detection completed! Found ${detections.length} zones/lines.`;
+
+                // Add detected annotations to the canvas
+                await this.addDetectedAnnotations(detections);
+
+                // Close modal after a short delay
+                setTimeout(() => {
+                    bootstrap.Modal.getInstance(document.getElementById('detectZonesLinesModal')).hide();
+                }, 2000);
+
             } else {
-                throw new Error('Failed to update annotation');
+                throw new Error(result.error || 'Detection failed');
             }
+
         } catch (error) {
-            console.error('Error updating annotation:', error);
-            this.showAlert('Failed to update annotation', 'danger');
+            console.error('Zone/line detection error:', error);
+            document.getElementById('detectionProgress').style.display = 'none';
+            this.showAlert(`Detection failed: ${error.message}`, 'danger');
         } finally {
-            this.showLoading(false);
-            this.currentEditingAnnotation = null;
+            document.getElementById('startDetectionBtn').disabled = false;
+        }
+    }
+
+    async addDetectedAnnotations(detections) {
+        if (!detections || detections.length === 0) {
+            this.showAlert('No zones or lines detected', 'info');
+            return;
+        }
+
+        let successCount = 0;
+        const totalCount = detections.length;
+
+        for (const detection of detections) {
+            try {
+                // Convert detection to our annotation format
+                const coords = detection.coordinates;
+                const classification = detection.classification;
+                const confidence = detection.confidence;
+                const originalClass = detection.original_class;
+
+                // Get color for this classification
+                const color = this.zoneColors[classification] || '#999999'; // Grey for unknown
+                const fillColor = this.hexToRgba(color, 0.1);
+
+                // Convert coordinates to canvas coordinates for display
+                const canvasCoords = this.imageToCanvasCoordinates(coords);
+
+                // Create fabric object  
+                const rect = new fabric.Rect({
+                    left: canvasCoords.x,
+                    top: canvasCoords.y,
+                    width: canvasCoords.width,
+                    height: canvasCoords.height,
+                    fill: fillColor,
+                    stroke: color,
+                    strokeWidth: 2,
+                    selectable: true,
+                    lockUniScaling: false,
+                    lockScalingFlip: false,
+                    uniformScaling: false,
+                    uniScaleTransform: false,
+                    centeredScaling: false,
+                    hasRotatingPoint: false,
+                    cornerStyle: 'rect',
+                    cornerSize: 8,
+                    transparentCorners: false,
+                    cornerColor: color,
+                    lockMovementX: false,
+                    lockMovementY: false
+                });
+
+                // Add to canvas first
+                this.canvas.add(rect);
+
+                // Save to database using the same pattern as manual annotations
+                const tempId = 'temp_' + Date.now() + '_' + Math.random();
+                const readingOrder = this.annotations.length;
+                
+                // Create local annotation
+                const formattedClass = this.formatClassificationName(classification);
+                const localAnnotation = {
+                    id: tempId,
+                    type: 'bbox',
+                    fabricObject: rect,
+                    coordinates: coords, // Store original image coordinates
+                    classification: classification,
+                    label: `${formattedClass} (${Math.round(confidence * 100)}%)`,
+                    reading_order: readingOrder,
+                    metadata: {
+                        confidence: confidence,
+                        original_class: originalClass,
+                        detected_by: 'roboflow'
+                    },
+                    transcription: null
+                };
+
+                this.annotations.push(localAnnotation);
+                rect.annotationId = tempId;
+
+                // Save to database
+                const annotationData = {
+                    image: this.currentImage.id,
+                    annotation_type: 'bbox',
+                    coordinates: coords, // Use original image coordinates
+                    classification: classification,
+                    label: `${formattedClass} (${Math.round(confidence * 100)}%)`,
+                    reading_order: readingOrder,
+                    metadata: {
+                        confidence: confidence,
+                        original_class: originalClass,
+                        detected_by: 'roboflow'
+                    }
+                };
+
+                const response = await fetch(`${this.apiBaseUrl}/annotations/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify(annotationData)
+                });
+
+                if (response.ok) {
+                    const savedAnnotation = await response.json();
+                    
+                    // Update local annotation with real ID
+                    const annotationIndex = this.annotations.findIndex(a => a.id === tempId);
+                    if (annotationIndex !== -1) {
+                        this.annotations[annotationIndex].id = savedAnnotation.id;
+                        this.annotations[annotationIndex].reading_order = savedAnnotation.reading_order;
+                        rect.annotationId = savedAnnotation.id;
+                    }
+                    
+                    successCount++;
+                } else {
+                    console.error('Failed to save detected annotation:', await response.text());
+                    // Remove from local array and canvas if save failed
+                    const failedIndex = this.annotations.findIndex(a => a.id === tempId);
+                    if (failedIndex !== -1) {
+                        this.annotations.splice(failedIndex, 1);
+                    }
+                    this.canvas.remove(rect);
+                }
+
+            } catch (error) {
+                console.error('Error processing detected annotation:', error);
+            }
+        }
+
+        // Update the annotations list in the sidebar
+        this.updateAnnotationsList();
+        this.canvas.renderAll();
+
+        if (successCount === totalCount) {
+            this.showAlert(`Successfully added ${successCount} detected annotations`, 'success');
+        } else if (successCount > 0) {
+            this.showAlert(`Added ${successCount} of ${totalCount} detected annotations (${totalCount - successCount} failed)`, 'warning');
+        } else {
+            this.showAlert('Failed to save detected annotations', 'danger');
         }
     }
 
@@ -3415,9 +4035,10 @@ class OCRApp {
                     </div>
                     <div class="prompt-item-preview">${prompt.prompt}</div>
                     <div class="prompt-item-zones">
-                        ${prompt.zones.map(zone => `
-                            <span class="badge bg-secondary prompt-zone-badge">${zone}</span>
-                        `).join('')}
+                        ${prompt.zones.map(zone => {
+                            const zoneColor = this.zoneColors[zone] || '#6c757d';
+                            return `<span class="badge prompt-zone-badge" style="background-color: ${zoneColor}; color: white;">${zone}</span>`;
+                        }).join('')}
                     </div>
                 </div>
             `;
@@ -4166,7 +4787,12 @@ class OCRApp {
     }
 
     renderAnnotationsOnCanvas(annotations) {
-        // Clear existing annotations
+        // Clear existing annotations from canvas and array
+        if (this.canvas) {
+            // Remove only annotation objects, preserve the background image
+            const objectsToRemove = this.canvas.getObjects().filter(obj => obj.annotationId);
+            objectsToRemove.forEach(obj => this.canvas.remove(obj));
+        }
         this.annotations = [];
         
         annotations.forEach(annotation => {
@@ -5244,6 +5870,877 @@ class OCRApp {
         div.textContent = text;
         return div.innerHTML;
     }
+
+    // Project and Document Level Detection and Transcription
+    showProjectDetectMenu(projectId, buttonElement) {
+        const menuId = `project-detect-menu-${projectId}`;
+        this.toggleLevelActionMenu(menuId, buttonElement);
+    }
+
+    showDocumentDetectMenu(documentId, buttonElement) {
+        const menuId = `document-detect-menu-${documentId}`;
+        this.toggleLevelActionMenu(menuId, buttonElement);
+    }
+
+    showProjectTranscribeMenu(projectId, buttonElement) {
+        const menuId = `project-transcribe-menu-${projectId}`;
+        this.toggleLevelActionMenu(menuId, buttonElement);
+    }
+
+    showDocumentTranscribeMenu(documentId, buttonElement) {
+        const menuId = `document-transcribe-menu-${documentId}`;
+        this.toggleLevelActionMenu(menuId, buttonElement);
+    }
+
+    toggleLevelActionMenu(menuId, buttonElement) {
+        // Close all other open menus first
+        document.querySelectorAll('.level-action-menu.show').forEach(menu => {
+            if (menu.id !== menuId) {
+                menu.classList.remove('show');
+            }
+        });
+
+        const menu = document.getElementById(menuId);
+        if (menu) {
+            menu.classList.toggle('show');
+            
+            // Position menu intelligently to prevent overflow
+            if (menu.classList.contains('show')) {
+                this.positionDropdownMenu(menu, buttonElement);
+                
+                // Close menu when clicking elsewhere
+                const closeMenu = (event) => {
+                    if (!menu.contains(event.target) && !buttonElement.contains(event.target)) {
+                        menu.classList.remove('show');
+                        // Reset positioning styles
+                        menu.style.left = '';
+                        menu.style.top = '';
+                        menu.style.position = '';
+                        document.removeEventListener('click', closeMenu);
+                    }
+                };
+                setTimeout(() => document.addEventListener('click', closeMenu), 0);
+            } else {
+                // Reset positioning styles when closing
+                menu.style.left = '';
+                menu.style.top = '';
+                menu.style.position = '';
+            }
+        }
+    }
+
+    positionDropdownMenu(menu, buttonElement) {
+        // Get viewport and element dimensions
+        const buttonRect = buttonElement.getBoundingClientRect();
+        const menuWidth = 280; // Our CSS min-width
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        const padding = 10; // Padding from screen edges
+        
+        // Calculate initial position (below the button, aligned to left edge)
+        let left = buttonRect.left;
+        let top = buttonRect.bottom + 5; // 5px gap below button
+        
+        // Adjust horizontal position to prevent overflow
+        const spaceOnRight = viewportWidth - buttonRect.right;
+        
+        if (spaceOnRight < menuWidth + padding) {
+            // Not enough space on the right, try different positioning
+            const spaceOnLeft = buttonRect.left;
+            
+            if (spaceOnLeft >= menuWidth + padding) {
+                // Align to right edge of button
+                left = buttonRect.right - menuWidth;
+            } else {
+                // Center on button if possible
+                const buttonCenter = buttonRect.left + (buttonRect.width / 2);
+                const menuHalfWidth = menuWidth / 2;
+                
+                if (buttonCenter - menuHalfWidth >= padding && 
+                    buttonCenter + menuHalfWidth <= viewportWidth - padding) {
+                    left = buttonCenter - menuHalfWidth;
+                } else {
+                    // Force it to fit within viewport
+                    left = Math.max(padding, Math.min(left, viewportWidth - menuWidth - padding));
+                }
+            }
+        }
+        
+        // Adjust vertical position if menu would go below viewport
+        const menuHeight = 200; // Estimated menu height
+        if (top + menuHeight > viewportHeight - padding) {
+            // Position above the button instead
+            top = buttonRect.top - menuHeight - 5;
+            
+            // If still doesn't fit, position it at the top of viewport
+            if (top < padding) {
+                top = padding;
+            }
+        }
+        
+        // Apply the calculated position
+        menu.style.left = left + 'px';
+        menu.style.top = top + 'px';
+        menu.style.position = 'fixed';
+    }
+
+        async detectProjectZones(projectId, mode) {
+        this.hideLevelActionMenus();
+        
+        // Check credentials first
+        const credentials = this.getStoredCredentials();
+        if (!credentials.roboflow_api_key || !credentials.roboflow_workspace_name || !credentials.roboflow_workflow_id) {
+            this.showAlert('Please configure Roboflow API settings in the credentials modal first', 'warning');
+            this.showCredentialsModal();
+            return;
+        }
+
+        // Show confirmation for destructive action
+        if (mode === 'all') {
+            const confirmed = confirm('⚠️ This will remove all existing zones and transcriptions for all images in this project. Are you sure you want to continue?');
+            if (!confirmed) return;
+        }
+
+        // Store context for zone selection modal
+        this.currentDetectionContext = {
+            type: 'project',
+            id: projectId,
+            mode: mode,
+            credentials: credentials
+        };
+
+        // Show zone selection modal
+        this.showZoneSelectionModal();
+    }
+
+         async detectDocumentZones(documentId, mode) {
+        this.hideLevelActionMenus();
+        
+        // Check credentials first
+        const credentials = this.getStoredCredentials();
+        if (!credentials.roboflow_api_key || !credentials.roboflow_workspace_name || !credentials.roboflow_workflow_id) {
+            this.showAlert('Please configure Roboflow API settings in the credentials modal first', 'warning');
+            this.showCredentialsModal();
+            return;
+        }
+
+        // Show confirmation for destructive action
+        if (mode === 'all') {
+            const confirmed = confirm('⚠️ This will remove all existing zones and transcriptions for all images in this document. Are you sure you want to continue?');
+            if (!confirmed) return;
+        }
+
+        // Store context for zone selection modal
+        this.currentDetectionContext = {
+            type: 'document',
+            id: documentId,
+            mode: mode,
+            credentials: credentials
+        };
+
+        // Show zone selection modal
+        this.showZoneSelectionModal();
+    }
+
+     async detectZonesForImage(imageId, credentials, clearExisting = false) {
+         try {
+             const response = await fetch(`${this.apiBaseUrl}/images/${imageId}/detect-zones-lines/`, {
+                 method: 'POST',
+                 headers: {
+                     'Authorization': `Token ${this.authToken}`,
+                     'Content-Type': 'application/json'
+                 },
+                 body: JSON.stringify({
+                     roboflow_api_key: credentials.roboflow_api_key,
+                     filter_selected_types: false,
+                     clear_existing: clearExisting,
+                     selected_zone_types: [],
+                     selected_line_types: []
+                 })
+             });
+
+             const result = await response.json();
+
+             if (response.ok && result.detections && result.detections.detections) {
+                 return { success: true, count: result.detections.detections.length };
+             } else {
+                 console.error(`Detection failed for image ${imageId}:`, result.error);
+                 return { success: false, count: 0 };
+             }
+         } catch (error) {
+             console.error(`Error detecting zones for image ${imageId}:`, error);
+             return { success: false, count: 0 };
+         }
+     }
+
+     async transcribeProject(projectId, mode) {
+         this.hideLevelActionMenus();
+         
+         // Check credentials first
+         const credentials = this.getStoredCredentials();
+         if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+             this.showAlert('Please configure your API credentials first', 'warning');
+             this.showCredentialsModal();
+             return;
+         }
+
+         // Show confirmation for destructive actions
+         if (mode !== 'untranscribed_images' && mode !== 'untranscribed_zones') {
+             const confirmed = confirm('⚠️ This may override existing transcriptions. Are you sure you want to continue?');
+             if (!confirmed) return;
+         }
+
+                 try {
+            this.showProgressModal('Transcribing Project', `Starting transcription for project (${this.getTranscriptionModeLabel(mode)})...`);
+
+             // Get all documents in the project
+             const docsResponse = await fetch(`${this.apiBaseUrl}/documents/?project=${projectId}`, {
+                 headers: { 'Authorization': `Token ${this.authToken}` }
+             });
+             
+             if (!docsResponse.ok) throw new Error('Failed to load project documents');
+             const documents = await docsResponse.json();
+
+             let totalProcessed = 0;
+             let successCount = 0;
+
+             // Process each document
+             for (const doc of documents.results) {
+                 const result = await this.transcribeDocumentImages(doc.id, mode, credentials);
+                 totalProcessed += result.processed;
+                 successCount += result.success;
+             }
+
+                         this.completeProgressModal('success', `Project transcription completed! Processed ${totalProcessed} items, ${successCount} successful.`);
+
+        } catch (error) {
+            console.error('Project transcription error:', error);
+            this.completeProgressModal('error', `Project transcription failed: ${error.message}`);
+        }
+     }
+
+     async transcribeDocument(documentId, mode) {
+         this.hideLevelActionMenus();
+         
+         // Check credentials first
+         const credentials = this.getStoredCredentials();
+         if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+             this.showAlert('Please configure your API credentials first', 'warning');
+             this.showCredentialsModal();
+             return;
+         }
+
+         // Show confirmation for destructive actions
+         if (mode !== 'untranscribed_images' && mode !== 'untranscribed_zones') {
+             const confirmed = confirm('⚠️ This may override existing transcriptions. Are you sure you want to continue?');
+             if (!confirmed) return;
+         }
+
+                 try {
+            this.showProgressModal('Transcribing Document', `Starting transcription for document (${this.getTranscriptionModeLabel(mode)})...`);
+
+            const result = await this.transcribeDocumentImages(documentId, mode, credentials);
+            
+            this.completeProgressModal('success', `Document transcription completed! Processed ${result.processed} items, ${result.success} successful.`);
+
+        } catch (error) {
+            console.error('Document transcription error:', error);
+            this.completeProgressModal('error', `Document transcription failed: ${error.message}`);
+        }
+     }
+
+     async transcribeDocumentImages(documentId, mode, credentials) {
+         // Get all images in the document
+         const imagesResponse = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}`, {
+             headers: { 'Authorization': `Token ${this.authToken}` }
+         });
+         
+         if (!imagesResponse.ok) throw new Error('Failed to load document images');
+         const images = await imagesResponse.json();
+
+         let processedCount = 0;
+         let successCount = 0;
+
+         for (const image of images.results) {
+             try {
+                 if (mode === 'full_image') {
+                     // Check if we should skip already transcribed images
+                     if (mode === 'untranscribed_images') {
+                         // Check if image already has full image transcription
+                         // This would require an API call to check transcription status
+                     }
+                     
+                     const result = await this.transcribeImageById(image.id, credentials, 'full_image');
+                     if (result.success) successCount++;
+                     processedCount++;
+                     
+                 } else if (mode === 'zones_only' || mode === 'untranscribed_zones') {
+                     // Get annotations for this image
+                     const annotationsResponse = await fetch(`${this.apiBaseUrl}/annotations/?image=${image.id}`, {
+                         headers: { 'Authorization': `Token ${this.authToken}` }
+                     });
+                     
+                     if (annotationsResponse.ok) {
+                         const annotations = await annotationsResponse.json();
+                         
+                         if (annotations.results.length === 0 && mode === 'zones_only') {
+                             this.showAlert(`Image ${image.name} has no zones. Run zone detection first.`, 'warning');
+                             continue;
+                         }
+
+                         for (const annotation of annotations.results) {
+                             // Skip if only processing untranscribed and this one is already transcribed
+                             if (mode === 'untranscribed_zones') {
+                                 const hasTranscription = await this.checkAnnotationHasTranscription(annotation.id);
+                                 if (hasTranscription) continue;
+                             }
+
+                             const result = await this.transcribeAnnotationById(annotation.id, credentials);
+                             if (result.success) successCount++;
+                             processedCount++;
+                         }
+                     }
+                 }
+                 
+             } catch (error) {
+                 console.error(`Failed to process image ${image.id}:`, error);
+                 processedCount++;
+             }
+         }
+
+         return { processed: processedCount, success: successCount };
+     }
+
+     async transcribeImageById(imageId, credentials, transcriptionType = 'full_image') {
+         try {
+             const requestData = {
+                 transcription_type: transcriptionType,
+                 api_endpoint: credentials.openai_api_key ? 'openai' : credentials.custom_endpoint_url,
+                 api_model: 'gpt-4o-mini'
+             };
+
+             if (credentials.openai_api_key) {
+                 requestData.openai_api_key = credentials.openai_api_key;
+             } else {
+                 requestData.custom_endpoint_auth = credentials.custom_endpoint_auth;
+             }
+
+             const response = await fetch(`${this.apiBaseUrl}/images/${imageId}/transcribe/`, {
+                 method: 'POST',
+                 headers: {
+                     'Content-Type': 'application/json',
+                     'Authorization': `Token ${this.authToken}`
+                 },
+                 body: JSON.stringify(requestData)
+             });
+
+             return { success: response.ok };
+         } catch (error) {
+             console.error(`Error transcribing image ${imageId}:`, error);
+             return { success: false };
+         }
+     }
+
+     async transcribeAnnotationById(annotationId, credentials) {
+         try {
+             // Get annotation details to find appropriate prompt
+             const annotationResponse = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
+                 headers: { 'Authorization': `Token ${this.authToken}` }
+             });
+             
+             if (!annotationResponse.ok) return { success: false };
+             const annotation = await annotationResponse.json();
+             
+             // Find the appropriate prompt for this annotation's classification
+             const prompt = this.getPromptForAnnotation(annotation);
+             let finalPrompt = prompt.prompt;
+             
+             const requestData = {
+                 transcription_type: 'annotation',
+                 api_endpoint: credentials.openai_api_key ? 'openai' : credentials.custom_endpoint_url,
+                 api_model: 'gpt-4o-mini',
+                 custom_prompt: finalPrompt,
+                 expected_metadata: prompt.metadata_fields || []
+             };
+
+             if (credentials.openai_api_key) {
+                 requestData.openai_api_key = credentials.openai_api_key;
+                 // For OpenAI, use structured output if metadata is expected
+                 if (prompt.metadata_fields && prompt.metadata_fields.length > 0) {
+                     requestData.use_structured_output = true;
+                     requestData.metadata_schema = this.createMetadataSchema(prompt.metadata_fields);
+                 } else {
+                     finalPrompt += '\n\nReturn the transcription as plain text. The main text should be clean and readable.';
+                     requestData.custom_prompt = finalPrompt;
+                 }
+             } else {
+                 // For other models, modify prompt to request JSON output
+                 if (prompt.metadata_fields && prompt.metadata_fields.length > 0) {
+                     finalPrompt += '\n\nPlease also return metadata in JSON format with the following fields: ' +
+                         prompt.metadata_fields.map(f => `${f.name} (${f.type})`).join(', ') +
+                         '. Return both the transcription and metadata in a JSON object with "text" and "metadata" keys in the following format:\n\n```json\n{"text": "your transcription here", "metadata": {"field1": value1, "field2": value2}}\n```';
+                 }
+                 requestData.custom_prompt = finalPrompt;
+                 requestData.custom_endpoint_auth = credentials.custom_endpoint_auth;
+             }
+
+             const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/transcribe/`, {
+                 method: 'POST',
+                 headers: {
+                     'Content-Type': 'application/json',
+                     'Authorization': `Token ${this.authToken}`
+                 },
+                 body: JSON.stringify(requestData)
+             });
+
+             return { success: response.ok };
+         } catch (error) {
+             console.error(`Error transcribing annotation ${annotationId}:`, error);
+             return { success: false };
+         }
+     }
+
+     async checkAnnotationHasTranscription(annotationId) {
+         try {
+             const response = await fetch(`${this.apiBaseUrl}/transcriptions/?annotation=${annotationId}`, {
+                 headers: { 'Authorization': `Token ${this.authToken}` }
+             });
+             
+             if (response.ok) {
+                 const transcriptions = await response.json();
+                 return transcriptions.results.length > 0;
+             }
+         } catch (error) {
+             console.error(`Error checking transcription for annotation ${annotationId}:`, error);
+         }
+         return false;
+     }
+
+     getTranscriptionModeLabel(mode) {
+         const labels = {
+             'full_image': 'full images',
+             'zones_only': 'zones/lines only',
+             'untranscribed_images': 'untranscribed images only',
+             'untranscribed_zones': 'untranscribed zones only'
+         };
+         return labels[mode] || mode;
+     }
+
+         hideLevelActionMenus() {
+        document.querySelectorAll('.level-action-menu.show').forEach(menu => {
+            menu.classList.remove('show');
+            // Reset positioning styles
+            menu.style.left = '';
+            menu.style.top = '';
+            menu.style.position = '';
+        });
+    }
+
+    // Zone Selection Modal Functions
+    showZoneSelectionModal() {
+        this.populateZoneSelectionModal();
+        this.selectDetectionMode('auto'); // Default to auto mode
+        const modal = new bootstrap.Modal(document.getElementById('zoneSelectionModal'));
+        modal.show();
+    }
+
+    selectDetectionMode(mode) {
+        // Update radio buttons
+        document.querySelectorAll('input[name="detectionMode"]').forEach(radio => {
+            radio.checked = radio.value === mode;
+        });
+
+        // Update visual selection
+        document.querySelectorAll('.zone-detection-mode').forEach(div => {
+            div.classList.remove('selected');
+        });
+        document.querySelector(`input[value="${mode}"]`).closest('.zone-detection-mode').classList.add('selected');
+
+        // Show/hide selective options
+        const selectiveOptions = document.getElementById('selectiveOptions');
+        selectiveOptions.style.display = mode === 'selective' ? 'block' : 'none';
+
+        this.selectedDetectionMode = mode;
+    }
+
+    populateZoneSelectionModal() {
+        if (!this.annotationTypes || !this.userEnabledTypes) return;
+
+        const zoneContainer = document.getElementById('zoneSelectionZoneTypes');
+        const lineContainer = document.getElementById('zoneSelectionLineTypes');
+
+        // Clear existing options
+        zoneContainer.innerHTML = '';
+        lineContainer.innerHTML = '';
+
+        // Add zone type checkboxes (including custom zones)
+        [...this.annotationTypes.all_types.zones, ...this.customZones].forEach(zoneType => {
+            if (this.userEnabledTypes.zones.includes(zoneType.value)) {
+                const checkbox = this.createZoneSelectionCheckbox(zoneType, 'zone');
+                zoneContainer.appendChild(checkbox);
+            }
+        });
+
+        // Add line type checkboxes
+        this.annotationTypes.all_types.lines.forEach(lineType => {
+            if (this.userEnabledTypes.lines.includes(lineType.value)) {
+                const checkbox = this.createZoneSelectionCheckbox(lineType, 'line');
+                lineContainer.appendChild(checkbox);
+            }
+        });
+    }
+
+    createZoneSelectionCheckbox(typeInfo, category) {
+        const div = document.createElement('div');
+        div.className = 'form-check';
+
+        const checkbox = document.createElement('input');
+        checkbox.className = 'form-check-input';
+        checkbox.type = 'checkbox';
+        checkbox.id = `zone_select_${category}_${typeInfo.value}`;
+        checkbox.value = typeInfo.value;
+        checkbox.checked = true; // Default to checked
+        checkbox.dataset.category = category;
+
+        const label = document.createElement('label');
+        label.className = 'form-check-label';
+        label.setAttribute('for', checkbox.id);
+        label.textContent = typeInfo.label;
+
+        div.appendChild(checkbox);
+        div.appendChild(label);
+
+        return div;
+    }
+
+    toggleAllZoneTypes(selectAll) {
+        document.querySelectorAll('#zoneSelectionZoneTypes input[type="checkbox"]').forEach(checkbox => {
+            checkbox.checked = selectAll;
+        });
+    }
+
+    toggleAllLineTypes(selectAll) {
+        document.querySelectorAll('#zoneSelectionLineTypes input[type="checkbox"]').forEach(checkbox => {
+            checkbox.checked = selectAll;
+        });
+    }
+
+    async startSelectedZoneDetection() {
+        const detectionMode = this.selectedDetectionMode || 'auto';
+        let selectedZones = [];
+        let selectedLines = [];
+        let useFiltering = false;
+
+        if (detectionMode === 'selective') {
+            // Collect selected zone and line types
+            document.querySelectorAll('#zoneSelectionZoneTypes input[type="checkbox"]:checked').forEach(checkbox => {
+                selectedZones.push(checkbox.value);
+            });
+
+            document.querySelectorAll('#zoneSelectionLineTypes input[type="checkbox"]:checked').forEach(checkbox => {
+                selectedLines.push(checkbox.value);
+            });
+
+            if (selectedZones.length === 0 && selectedLines.length === 0) {
+                this.showAlert('Please select at least one zone or line type to detect', 'warning');
+                return;
+            }
+            useFiltering = true;
+        } else {
+            // Auto mode - don't filter, let the model detect everything
+            useFiltering = false;
+            selectedZones = [];
+            selectedLines = [];
+        }
+
+        // Close zone selection modal
+        bootstrap.Modal.getInstance(document.getElementById('zoneSelectionModal')).hide();
+
+        // Start detection with selected types and mode
+        const context = this.currentDetectionContext;
+        if (context.type === 'project') {
+            await this.executeProjectDetection(context.id, context.mode, context.credentials, selectedZones, selectedLines, useFiltering);
+        } else if (context.type === 'document') {
+            await this.executeDocumentDetection(context.id, context.mode, context.credentials, selectedZones, selectedLines, useFiltering);
+        }
+    }
+
+    // Background Detection Processing
+    async executeProjectDetection(projectId, mode, credentials, selectedZones, selectedLines, useFiltering = false) {
+        this.operationCancelled = false;
+        this.showProgressModal('Detecting Zones', `Starting zone detection for project (${mode === 'all' ? 'all pages' : 'unannotated pages only'})...`);
+
+        try {
+            // Get all documents in the project
+            const docsResponse = await fetch(`${this.apiBaseUrl}/documents/?project=${projectId}`, {
+                headers: { 'Authorization': `Token ${this.authToken}` }
+            });
+            
+            if (!docsResponse.ok) throw new Error('Failed to load project documents');
+            const documents = await docsResponse.json();
+
+            let totalImages = 0;
+            let allImages = [];
+
+            // Collect all images
+            for (const doc of documents.results) {
+                const imagesResponse = await fetch(`${this.apiBaseUrl}/images/?document=${doc.id}`, {
+                    headers: { 'Authorization': `Token ${this.authToken}` }
+                });
+                
+                if (imagesResponse.ok) {
+                    const images = await imagesResponse.json();
+                    images.results.forEach(image => {
+                        allImages.push({ ...image, documentId: doc.id, documentName: doc.name });
+                    });
+                    totalImages += images.results.length;
+                }
+            }
+
+            this.updateProgress(0, totalImages, 'Initialized', `Found ${totalImages} images to process`);
+
+            let processedImages = 0;
+            let successCount = 0;
+
+            // Process each image
+            for (const image of allImages) {
+                if (this.operationCancelled) break;
+
+                try {
+                    this.updateProgress(processedImages, totalImages, 'Processing', `Processing ${image.name} in ${image.documentName}`);
+
+                    // Check if we should skip this image
+                    if (mode === 'unannotated') {
+                        const annotationsResponse = await fetch(`${this.apiBaseUrl}/annotations/?image=${image.id}`, {
+                            headers: { 'Authorization': `Token ${this.authToken}` }
+                        });
+                        if (annotationsResponse.ok) {
+                            const annotations = await annotationsResponse.json();
+                            if (annotations.results && annotations.results.length > 0) {
+                                this.addProgressItem(image.name, 'skipped', 'Already has annotations');
+                                processedImages++;
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Perform detection
+                    const result = await this.detectZonesForImage(image.id, credentials, mode === 'all', selectedZones, selectedLines, useFiltering);
+                    if (result.success) {
+                        successCount += result.count;
+                        this.addProgressItem(image.name, 'success', `Detected ${result.count} zones/lines`);
+                    } else {
+                        this.addProgressItem(image.name, 'error', result.error || 'Detection failed');
+                    }
+                    
+                } catch (error) {
+                    console.error(`Failed to process image ${image.id}:`, error);
+                    this.addProgressItem(image.name, 'error', error.message);
+                }
+                
+                processedImages++;
+                this.updateProgress(processedImages, totalImages, 'Processing', `${successCount} zones detected so far`);
+            }
+
+            if (this.operationCancelled) {
+                this.completeProgressModal('warning', 'Operation cancelled by user');
+            } else {
+                this.completeProgressModal('success', `Detection completed! Processed ${processedImages} images, detected ${successCount} zones/lines.`);
+                // Refresh project tree to show status icons
+                await this.loadProjects();
+                
+                // If the current image was part of this detection, refresh the image view
+                if (this.currentImage && allImages.some(img => img.id === this.currentImage.id)) {
+                    await this.loadImageAnnotations();
+                    this.updateAnnotationsList();
+                }
+            }
+
+        } catch (error) {
+            console.error('Project detection error:', error);
+            this.completeProgressModal('error', `Detection failed: ${error.message}`);
+        }
+    }
+
+    async executeDocumentDetection(documentId, mode, credentials, selectedZones, selectedLines, useFiltering = false) {
+        this.operationCancelled = false;
+        this.showProgressModal('Detecting Zones', `Starting zone detection for document (${mode === 'all' ? 'all pages' : 'unannotated pages only'})...`);
+
+        try {
+            // Get all images in the document
+            const imagesResponse = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}`, {
+                headers: { 'Authorization': `Token ${this.authToken}` }
+            });
+            
+            if (!imagesResponse.ok) throw new Error('Failed to load document images');
+            const images = await imagesResponse.json();
+
+            const totalImages = images.results.length;
+            this.updateProgress(0, totalImages, 'Initialized', `Found ${totalImages} images to process`);
+
+            let processedImages = 0;
+            let successCount = 0;
+
+            // Process each image
+            for (const image of images.results) {
+                if (this.operationCancelled) break;
+
+                try {
+                    this.updateProgress(processedImages, totalImages, 'Processing', `Processing ${image.name}`);
+
+                    // Check if we should skip this image
+                    if (mode === 'unannotated') {
+                        const annotationsResponse = await fetch(`${this.apiBaseUrl}/annotations/?image=${image.id}`, {
+                            headers: { 'Authorization': `Token ${this.authToken}` }
+                        });
+                        if (annotationsResponse.ok) {
+                            const annotations = await annotationsResponse.json();
+                            if (annotations.results && annotations.results.length > 0) {
+                                this.addProgressItem(image.name, 'skipped', 'Already has annotations');
+                                processedImages++;
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Perform detection
+                    const result = await this.detectZonesForImage(image.id, credentials, mode === 'all', selectedZones, selectedLines, useFiltering);
+                    if (result.success) {
+                        successCount += result.count;
+                        this.addProgressItem(image.name, 'success', `Detected ${result.count} zones/lines`);
+                    } else {
+                        this.addProgressItem(image.name, 'error', result.error || 'Detection failed');
+                    }
+                    
+                } catch (error) {
+                    console.error(`Failed to process image ${image.id}:`, error);
+                    this.addProgressItem(image.name, 'error', error.message);
+                }
+                
+                processedImages++;
+                this.updateProgress(processedImages, totalImages, 'Processing', `${successCount} zones detected so far`);
+            }
+
+            if (this.operationCancelled) {
+                this.completeProgressModal('warning', 'Operation cancelled by user');
+            } else {
+                this.completeProgressModal('success', `Detection completed! Processed ${processedImages} images, detected ${successCount} zones/lines.`);
+                // Refresh document tree to show status icons
+                await this.loadProjects();
+                
+                // If the current image was part of this detection, refresh the image view
+                if (this.currentImage && images.results.some(img => img.id === this.currentImage.id)) {
+                    await this.loadImageAnnotations();
+                    this.updateAnnotationsList();
+                }
+            }
+
+        } catch (error) {
+            console.error('Document detection error:', error);
+            this.completeProgressModal('error', `Detection failed: ${error.message}`);
+        }
+    }
+
+    async detectZonesForImage(imageId, credentials, clearExisting = false, selectedZones = [], selectedLines = [], useFiltering = false) {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/images/${imageId}/detect-zones-lines/`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Token ${this.authToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    roboflow_api_key: credentials.roboflow_api_key,
+                    filter_selected_types: useFiltering,
+                    clear_existing: clearExisting,
+                    selected_zone_types: selectedZones,
+                    selected_line_types: selectedLines,
+                    apply_mappings: true // Always apply detection mappings
+                })
+            });
+
+            const result = await response.json();
+
+            if (response.ok && result.detections && result.detections.detections) {
+                return { success: true, count: result.detections.detections.length };
+            } else {
+                console.error(`Detection failed for image ${imageId}:`, result.error || 'Unknown error');
+                return { success: false, count: 0, error: result.error || 'Unknown error' };
+            }
+        } catch (error) {
+            console.error(`Error detecting zones for image ${imageId}:`, error);
+            return { success: false, count: 0, error: error.message };
+        }
+    }
+
+    // Progress Modal Functions
+    showProgressModal(title, initialMessage) {
+        document.getElementById('progressModalTitle').innerHTML = `<i class="fas fa-cog fa-spin me-2"></i>${title}`;
+        document.getElementById('progressMainLabel').textContent = 'Overall Progress';
+        document.getElementById('progressMainStats').textContent = '0 / 0';
+        document.getElementById('progressMainBar').style.width = '0%';
+        document.getElementById('progressCurrentTask').textContent = initialMessage;
+        document.getElementById('progressDetails').innerHTML = '';
+        
+        document.getElementById('progressCancelBtn').style.display = 'inline-block';
+        document.getElementById('progressCloseBtn').style.display = 'none';
+
+        const modal = new bootstrap.Modal(document.getElementById('progressModal'));
+        modal.show();
+    }
+
+    updateProgress(current, total, status, message) {
+        const percentage = total > 0 ? Math.round((current / total) * 100) : 0;
+        
+        document.getElementById('progressMainStats').textContent = `${current} / ${total}`;
+        document.getElementById('progressMainBar').style.width = `${percentage}%`;
+        document.getElementById('progressCurrentTask').textContent = message;
+    }
+
+    addProgressItem(itemName, status, message) {
+        const details = document.getElementById('progressDetails');
+        const icons = {
+            success: 'fas fa-check-circle',
+            error: 'fas fa-times-circle', 
+            processing: 'fas fa-cog fa-spin',
+            skipped: 'fas fa-forward'
+        };
+
+        const item = document.createElement('div');
+        item.className = `progress-item ${status}`;
+        item.innerHTML = `
+            <span class="progress-item-icon"><i class="${icons[status]}"></i></span>
+            <span class="progress-item-text">${itemName}</span>
+            <span class="progress-item-count">${message}</span>
+        `;
+
+        details.appendChild(item);
+        details.scrollTop = details.scrollHeight;
+    }
+
+    completeProgressModal(status, message) {
+        const title = document.getElementById('progressModalTitle');
+        const icons = {
+            success: 'fas fa-check-circle text-success',
+            error: 'fas fa-times-circle text-danger',
+            warning: 'fas fa-exclamation-triangle text-warning'
+        };
+
+        title.innerHTML = `<i class="${icons[status]} me-2"></i>Complete`;
+        document.getElementById('progressCurrentTask').textContent = message;
+        
+        document.getElementById('progressCancelBtn').style.display = 'none';
+        document.getElementById('progressCloseBtn').style.display = 'inline-block';
+
+        // Show alert as well
+        const alertTypes = { success: 'success', error: 'danger', warning: 'warning' };
+        this.showAlert(message, alertTypes[status]);
+    }
+
+    cancelOperation() {
+        this.operationCancelled = true;
+        this.completeProgressModal('warning', 'Cancelling operation...');
+    }
 }
 
 // Global Functions (called from HTML)
@@ -5251,6 +6748,10 @@ let app;
 
 document.addEventListener('DOMContentLoaded', () => {
     app = new OCRApp();
+    
+    // Make debug functions available globally for troubleshooting
+    window.debugPrompts = () => app.debugPromptClassifications();
+    window.ensureMainZonePrompt = () => app.ensureMainZonePrompt();
 });
 
 // Global functions for HTML onclick handlers
@@ -5290,6 +6791,22 @@ function showCredentialsModal() {
 
 function saveCredentials() {
     app.saveCredentials();
+}
+
+function showDetectZonesLinesModal() {
+    app.showDetectZonesLinesModal();
+}
+
+function startZoneLineDetection() {
+    app.startZoneLineDetection();
+}
+
+function toggleDetectionMapper() {
+    app.toggleDetectionMapper();
+}
+
+function addDetectionMapping() {
+    app.addDetectionMapping();
 }
 
 function showCreateProjectModal() {

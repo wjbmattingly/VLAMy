@@ -36,6 +36,7 @@ urlpatterns = [
     path('images/<uuid:pk>/transcribe/', views.TranscribeImageView.as_view(), name='transcribe_image'),
     path('images/<uuid:pk>/annotations/', views.ImageAnnotationsView.as_view(), name='image_annotations'),
     path('images/<uuid:pk>/annotations/reorder/', views.ReorderAnnotationsView.as_view(), name='reorder_annotations'),
+    path('images/<uuid:pk>/detect-zones-lines/', views.DetectZonesLinesView.as_view(), name='detect_zones_lines'),
     
     # Annotation transcription
     path('annotations/<uuid:pk>/transcribe/', views.TranscribeAnnotationView.as_view(), name='transcribe_annotation'),

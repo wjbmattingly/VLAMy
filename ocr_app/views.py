@@ -39,7 +39,7 @@ from .serializers import (
     AnnotationSerializer, TranscriptionSerializer, ExportJobSerializer,
     APICredentialsSerializer, TranscriptionRequestSerializer
 )
-from .services import OCRService, ExportService
+from .services import OCRService, ExportService, RoboflowDetectionService
 from .permissions import IsOwnerOrSharedUser, IsApprovedUser
 
 
@@ -776,6 +776,133 @@ class RevertTranscriptionView(APIView):
             
         except Transcription.DoesNotExist:
             return Response({'error': 'Transcription not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+class DetectZonesLinesView(APIView):
+    """Detect zones and lines using Roboflow API"""
+    permission_classes = [IsAuthenticated, IsApprovedUser]
+    
+    def post(self, request, pk):
+        try:
+            image = Image.objects.get(pk=pk)
+            
+            # Check permissions
+            user = request.user
+            if not (image.document.project.owner == user or 
+                   image.document.project.shared_with.filter(id=user.id).exists()):
+                return Response(
+                    {'error': 'Permission denied'}, 
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            # Get Roboflow settings from user profile
+            profile = user.profile
+            if not profile.roboflow_api_key_set or not profile.roboflow_workspace_name or not profile.roboflow_workflow_id:
+                return Response({
+                    'error': 'Roboflow API key, workspace name, and workflow ID must be configured in settings'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Get API key from request (stored client-side)
+            roboflow_api_key = request.data.get('roboflow_api_key')
+            if not roboflow_api_key:
+                return Response({
+                    'error': 'Roboflow API key required'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Get settings for filtering results and clearing existing annotations
+            filter_selected_types = request.data.get('filter_selected_types', False)
+            selected_zone_types = request.data.get('selected_zone_types', [])
+            selected_line_types = request.data.get('selected_line_types', [])
+            clear_existing = request.data.get('clear_existing', False)
+            
+            # Get the local file path for the image
+            if image.image_file:
+                # Use the absolute path to the image file
+                image_path = image.image_file.path
+                if not os.path.exists(image_path):
+                    return Response({
+                        'error': 'Image file not found on disk'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+            else:
+                return Response({
+                    'error': 'Image file not found'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Initialize Roboflow service
+            roboflow_service = RoboflowDetectionService(
+                api_key=roboflow_api_key,
+                workspace_name=profile.roboflow_workspace_name,
+                workflow_id=profile.roboflow_workflow_id
+            )
+            
+            # Perform detection
+            try:
+                detection_results = roboflow_service.detect_zones_lines(image_path)
+                
+                # Map classifications using user profile and custom mappings
+                for detection in detection_results['detections']:
+                    original_class = detection['classification']
+                    
+                    # Determine detection type (zone or line)
+                    aspect_ratio = detection['coordinates']['width'] / detection['coordinates']['height'] if detection['coordinates']['height'] > 0 else 1
+                    detection_type = roboflow_service._classify_detection_type(original_class, aspect_ratio)
+                    
+                    # Map classification
+                    mapped_class = roboflow_service._map_classification(original_class, detection_type, profile)
+                    
+                    # Debug logging
+                    print(f"MAPPING: '{original_class}' -> '{mapped_class}' (type: {detection_type})")
+                    if profile.custom_detection_mappings:
+                        print(f"Custom mappings available: {profile.custom_detection_mappings}")
+                    
+                    detection['classification'] = mapped_class
+                
+                # Filter results if requested
+                if filter_selected_types:
+                    filtered_detections = []
+                    for detection in detection_results['detections']:
+                        classification = detection.get('classification', '')
+                        
+                        # Check if this detection should be included
+                        if classification in selected_zone_types or classification in selected_line_types:
+                            filtered_detections.append(detection)
+                    
+                    detection_results['detections'] = filtered_detections
+                    detection_results['total_detections'] = len(filtered_detections)
+                
+                # Clear existing annotations if requested
+                if clear_existing:
+                    from .models import Annotation
+                    Annotation.objects.filter(image=image).delete()
+                
+                # Create annotation records in database
+                created_annotations = []
+                for i, detection in enumerate(detection_results['detections']):
+                    from .models import Annotation
+                    annotation = Annotation.objects.create(
+                        image=image,
+                        annotation_type='bbox',  # Roboflow returns bounding boxes
+                        coordinates=detection['coordinates'],
+                        classification=detection['classification'],
+                        reading_order=i,
+                        created_by=user
+                    )
+                    created_annotations.append(annotation)
+                
+                return Response({
+                    'status': 'success',
+                    'image_id': str(image.id),
+                    'detections': detection_results,
+                    'annotations_created': len(created_annotations)
+                })
+                
+            except Exception as e:
+                return Response({
+                    'error': f'Detection failed: {str(e)}'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        except Image.DoesNotExist:
+            return Response({'error': 'Image not found'}, status=status.HTTP_404_NOT_FOUND)
 
 
 class ExportJobViewSet(viewsets.ModelViewSet):
