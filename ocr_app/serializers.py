@@ -313,6 +313,12 @@ class TranscriptionRequestSerializer(serializers.Serializer):
     openai_api_key = serializers.CharField(required=False, allow_blank=True, write_only=True)
     custom_endpoint_auth = serializers.CharField(required=False, allow_blank=True, write_only=True)
     
+    # Vertex AI credentials
+    vertex_access_token = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    vertex_project_id = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    vertex_location = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    vertex_model = serializers.CharField(required=False, allow_blank=True, write_only=True)
+    
     # Custom prompt and metadata fields
     custom_prompt = serializers.CharField(required=False, allow_blank=True)
     expected_metadata = serializers.ListField(required=False, allow_empty=True)
@@ -326,6 +332,15 @@ class TranscriptionRequestSerializer(serializers.Serializer):
         if attrs['api_endpoint'] == 'openai' and not attrs.get('openai_api_key'):
             raise serializers.ValidationError(
                 "OpenAI API key is required for OpenAI endpoint."
+            )
+        
+        if attrs['api_endpoint'] == 'vertex' and not all([
+            attrs.get('vertex_access_token'),
+            attrs.get('vertex_project_id'),
+            attrs.get('vertex_location')
+        ]):
+            raise serializers.ValidationError(
+                "Vertex access token, project ID, and location are required for Vertex endpoint."
             )
         
         return attrs 

@@ -234,12 +234,18 @@ class OCRService:
     def __init__(self):
         self.openai_base_url = "https://api.openai.com/v1"
     
-    def transcribe_image(self, image_path, api_endpoint, api_key=None, custom_auth=None, api_model=None):
+    def transcribe_image(self, image_path, api_endpoint, api_key=None, custom_auth=None, api_model=None,
+                        vertex_access_token=None, vertex_project_id=None, vertex_location=None, vertex_model=None):
         """
         Transcribe a full image using specified API endpoint
         """
         if api_endpoint == 'openai':
             return self._transcribe_with_openai(image_path, api_key, api_model)
+        elif api_endpoint == 'vertex':
+            return self._transcribe_with_vertex(
+                image_path, vertex_access_token, vertex_project_id, 
+                vertex_location, vertex_model
+            )
         else:
             return self._transcribe_with_custom_endpoint(
                 image_path, api_endpoint, custom_auth, api_model
@@ -247,7 +253,8 @@ class OCRService:
     
     def transcribe_annotation(self, image_path, annotation, api_endpoint, api_key=None, custom_auth=None, 
                             api_model=None, custom_prompt=None, expected_metadata=None, 
-                            use_structured_output=False, metadata_schema=None):
+                            use_structured_output=False, metadata_schema=None,
+                            vertex_access_token=None, vertex_project_id=None, vertex_location=None, vertex_model=None):
         """
         Transcribe a specific annotation region from an image with custom prompts and metadata extraction
         """
@@ -260,6 +267,11 @@ class OCRService:
                 result = self._transcribe_with_openai(
                     region_image_path, api_key, api_model, custom_prompt, 
                     use_structured_output, metadata_schema
+                )
+            elif api_endpoint == 'vertex':
+                result = self._transcribe_with_vertex(
+                    region_image_path, vertex_access_token, vertex_project_id, 
+                    vertex_location, vertex_model, custom_prompt, expected_metadata
                 )
             else:
                 result = self._transcribe_with_custom_endpoint(
@@ -407,6 +419,106 @@ class OCRService:
             'text': text_content,
             'metadata': metadata,
             'confidence': None,  # OpenAI doesn't provide confidence scores
+            'raw_response': result
+        }
+
+    def _transcribe_with_vertex(self, image_path, access_token, project_id, location, model, custom_prompt=None, expected_metadata=None):
+        """
+        Transcribe image using Google Vertex AI Vision API
+        """
+        if not all([access_token, project_id, location]):
+            raise ValueError("Vertex access token, project ID, and location are required")
+        
+        # Encode image as base64
+        with open(image_path, 'rb') as image_file:
+            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+        
+        # Use custom prompt or default
+        prompt_text = custom_prompt or "Please transcribe all text visible in this image. Return only the transcribed text without any additional commentary."
+        
+        # Handle model name conversion from frontend format to Vertex format
+        if model and model.startswith('google/'):
+            model_name = model.replace('google/', '')
+        else:
+            model_name = model or 'gemini-1.5-pro-001'
+        
+        # Construct Vertex AI API endpoint - use different format for Gemini models
+        if 'gemini' in model_name:
+            endpoint = f"https://{location}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{location}/publishers/google/models/{model_name}:generateContent"
+        else:
+            endpoint = f"https://{location}-aiplatform.googleapis.com/v1/projects/{project_id}/locations/{location}/publishers/google/models/{model_name}:predict"
+        
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": prompt_text
+                        },
+                        {
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": base64_image
+                            }
+                        }
+                    ]
+                }
+            ],
+            "generation_config": {
+                "max_output_tokens": 2048,
+                "temperature": 0.1
+            }
+        }
+        
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=60)
+        
+        if response.status_code != 200:
+            logger.error(f"Vertex AI API error: {response.status_code} - {response.text}")
+            logger.error(f"Endpoint: {endpoint}")
+            logger.error(f"Model: {model_name}")
+            raise Exception(f"Vertex AI API error: {response.status_code} - {response.text}")
+        
+        try:
+            result = response.json()
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse Vertex AI response as JSON: {response.text}")
+            raise Exception(f"Invalid JSON response from Vertex AI: {e}")
+        
+        # Extract text and metadata from Vertex AI response
+        text_content = ""
+        metadata = {}
+        
+        if 'candidates' in result and len(result['candidates']) > 0:
+            candidate = result['candidates'][0]
+            if 'content' in candidate and 'parts' in candidate['content']:
+                for part in candidate['content']['parts']:
+                    if 'text' in part:
+                        content = part['text']
+                        
+                        # Try to parse JSON response if metadata is expected
+                        if expected_metadata and content.strip().startswith('{'):
+                            try:
+                                parsed = json.loads(content)
+                                if 'text' in parsed and 'metadata' in parsed:
+                                    text_content = parsed['text']
+                                    metadata = parsed['metadata']
+                                else:
+                                    text_content = content
+                            except json.JSONDecodeError:
+                                text_content = content
+                        else:
+                            text_content = content
+        
+        return {
+            'text': text_content,
+            'metadata': metadata,
+            'confidence': None,  # Vertex AI doesn't provide confidence scores in this format
             'raw_response': result
         }
     

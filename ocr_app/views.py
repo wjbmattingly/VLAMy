@@ -638,7 +638,11 @@ class TranscribeImageView(APIView):
                     api_endpoint=serializer.validated_data['api_endpoint'],
                     api_key=serializer.validated_data.get('openai_api_key'),
                     custom_auth=serializer.validated_data.get('custom_endpoint_auth'),
-                    api_model=serializer.validated_data.get('api_model')
+                    api_model=serializer.validated_data.get('api_model'),
+                    vertex_access_token=serializer.validated_data.get('vertex_access_token'),
+                    vertex_project_id=serializer.validated_data.get('vertex_project_id'),
+                    vertex_location=serializer.validated_data.get('vertex_location'),
+                    vertex_model=serializer.validated_data.get('vertex_model')
                 )
                 processing_time = time.time() - start_time
                 
@@ -709,7 +713,11 @@ class TranscribeAnnotationView(APIView):
                     custom_prompt=serializer.validated_data.get('custom_prompt'),
                     expected_metadata=serializer.validated_data.get('expected_metadata', []),
                     use_structured_output=serializer.validated_data.get('use_structured_output', False),
-                    metadata_schema=serializer.validated_data.get('metadata_schema')
+                    metadata_schema=serializer.validated_data.get('metadata_schema'),
+                    vertex_access_token=serializer.validated_data.get('vertex_access_token'),
+                    vertex_project_id=serializer.validated_data.get('vertex_project_id'),
+                    vertex_location=serializer.validated_data.get('vertex_location'),
+                    vertex_model=serializer.validated_data.get('vertex_model')
                 )
                 processing_time = time.time() - start_time
                 

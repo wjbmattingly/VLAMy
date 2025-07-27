@@ -3556,7 +3556,10 @@ async ensureMainZonePrompt() {
     getSelectedModel() {
         const modelSelect = document.getElementById('transcriptionModel');
         if (!modelSelect || !modelSelect.value) {
-            return this.getActiveModel(); // fallback to default
+            // fallback to active provider/model
+            const provider = this.getActiveProvider();
+            const model = this.getActiveModel();
+            return { provider, model };
         }
         
         const [provider, model] = modelSelect.value.split(':');
@@ -4809,8 +4812,9 @@ async ensureMainZonePrompt() {
 
             if (response.ok) {
                 this.currentImage = await response.json();
+                this.clearImageData();
                 await this.loadImageInCanvas();
-                await this.loadImageAnnotations();
+                // Annotations are now loaded in loadImageInCanvas after transform is set
                 await this.loadImageTranscriptions();
                 
                 // Refresh annotation positions after image and transform are set
@@ -4928,7 +4932,7 @@ async ensureMainZonePrompt() {
             const imgElement = new Image();
             imgElement.crossOrigin = 'anonymous';
             
-            imgElement.onload = () => {
+            imgElement.onload = async () => {
                 // Clear canvas
                 this.canvas.clear();
                 
@@ -4997,6 +5001,9 @@ async ensureMainZonePrompt() {
                     originalWidth: imgWidth,
                     originalHeight: imgHeight
                 };
+
+                // Load annotations AFTER image transform is set up
+                await this.loadImageAnnotations();
             };
 
             imgElement.src = this.currentImage.image_file;
@@ -5025,6 +5032,12 @@ async ensureMainZonePrompt() {
     }
 
     renderAnnotationsOnCanvas(annotations) {
+        // Ensure image transform is ready before rendering annotations
+        if (!this.imageTransform) {
+            console.warn('Image transform not ready, deferring annotation rendering');
+            return;
+        }
+
         // Clear existing annotations from canvas and array
         if (this.canvas) {
             // Remove only annotation objects, preserve the background image
@@ -6115,6 +6128,49 @@ async ensureMainZonePrompt() {
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
+    }
+
+    // Utility function to safely parse JSON from model responses
+    parseModelResponseJson(response) {
+        // If the response is already an object, return it as-is
+        if (typeof response === 'object' && response !== null) {
+            return response;
+        }
+        
+        // Convert to string if not already
+        const responseText = String(response || '').trim();
+        
+        // If empty, return original
+        if (!responseText) {
+            return response;
+        }
+        
+        try {
+            // First try to parse the entire response as JSON
+            return JSON.parse(responseText);
+        } catch (e) {
+            // If that fails, try to extract JSON from the response
+            try {
+                // Look for JSON in markdown code blocks
+                const jsonBlockMatch = responseText.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+                if (jsonBlockMatch) {
+                    return JSON.parse(jsonBlockMatch[1]);
+                }
+                
+                // Look for plain JSON object
+                const jsonMatch = responseText.match(/\{[\s\S]*?\}/);
+                if (jsonMatch) {
+                    return JSON.parse(jsonMatch[0]);
+                }
+                
+                // If no JSON patterns found, return original response
+                return response;
+            } catch (parseError) {
+                // If all parsing attempts fail, return original response
+                console.log('Could not parse JSON from model response:', parseError);
+                return response;
+            }
+        }
     }
 
     // Project and Document Level Detection and Transcription
@@ -7616,4 +7672,9 @@ function toggleAllTranscriptionLineTypes(selectAll) {
 
 function startSelectedZoneTranscription() {
     app.startSelectedZoneTranscription();
+}
+
+// Utility function for parsing model JSON responses
+function parseModelResponseJson(response) {
+    return app.parseModelResponseJson(response);
 }
