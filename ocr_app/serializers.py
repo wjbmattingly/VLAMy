@@ -71,7 +71,7 @@ class ProjectListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Project
         fields = [
-            'id', 'name', 'description', 'owner', 'is_public', 
+            'id', 'name', 'description', 'owner', 'is_public', 'order',
             'document_count', 'image_count', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'owner', 'created_at', 'updated_at']
@@ -177,7 +177,7 @@ class TranscriptionSerializer(serializers.ModelSerializer):
 
 class ImageListSerializer(serializers.ModelSerializer):
     document = serializers.StringRelatedField(read_only=True)
-    document_id = serializers.UUIDField(write_only=True)
+    document_id = serializers.SerializerMethodField()
     annotation_count = serializers.SerializerMethodField()
     transcription_count = serializers.SerializerMethodField()
     has_current_transcription = serializers.SerializerMethodField()
@@ -191,9 +191,12 @@ class ImageListSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at'
         ]
         read_only_fields = [
-            'id', 'original_filename', 'file_size', 'width', 'height', 'is_processed', 'processing_error',
+            'id', 'document_id', 'original_filename', 'file_size', 'width', 'height', 'is_processed', 'processing_error',
             'created_at', 'updated_at'
         ]
+
+    def get_document_id(self, obj):
+        return str(obj.document.id)
     
     def get_annotation_count(self, obj):
         return obj.annotations.count()
@@ -203,19 +206,6 @@ class ImageListSerializer(serializers.ModelSerializer):
     
     def get_has_current_transcription(self, obj):
         return obj.transcriptions.filter(is_current=True, annotation__isnull=True).exists()
-    
-    def validate_document_id(self, value):
-        user = self.context['request'].user
-        try:
-            document = Document.objects.get(id=value)
-            project = document.project
-            if project.owner != user and not project.projectpermission_set.filter(
-                user=user, permission__in=['edit', 'admin']
-            ).exists():
-                raise serializers.ValidationError("You don't have permission to add images to this document.")
-            return value
-        except Document.DoesNotExist:
-            raise serializers.ValidationError("Document not found.")
 
 
 class ImageDetailSerializer(ImageListSerializer):

@@ -1479,6 +1479,16 @@ async ensureMainZonePrompt() {
             return;
         }
 
+        // Add Edit Structure button at the top
+        const editStructureHeader = document.createElement('div');
+        editStructureHeader.className = 'edit-structure-header p-2 border-bottom';
+        editStructureHeader.innerHTML = `
+            <button class="btn btn-sm btn-outline-primary w-100" onclick="app.showEditStructureModal()">
+                <i class="fas fa-edit me-2"></i>Edit Structure
+            </button>
+        `;
+        treeContainer.appendChild(editStructureHeader);
+
         projects.forEach(project => {
             const projectElement = this.createProjectTreeItem(project);
             treeContainer.appendChild(projectElement);
@@ -1494,7 +1504,15 @@ async ensureMainZonePrompt() {
             <div class="tree-item-content" onclick="app.toggleProject('${project.id}')">
                 <i class="fas fa-caret-right tree-toggle"></i>
                 <i class="fas fa-folder tree-icon"></i>
-                <span class="tree-text">${project.name}</span>
+                <span class="tree-text editable-text" onclick="event.stopPropagation(); app.startRename('project', '${project.id}', this)" title="Click to rename">${project.name}</span>
+                <div class="tree-reorder-controls">
+                    <button class="btn btn-xs btn-outline-secondary" onclick="event.stopPropagation(); app.moveItem('project', '${project.id}', 'up')" title="Move Up">
+                        <i class="fas fa-chevron-up"></i>
+                    </button>
+                    <button class="btn btn-xs btn-outline-secondary" onclick="event.stopPropagation(); app.moveItem('project', '${project.id}', 'down')" title="Move Down">
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                </div>
                 <div class="tree-actions level-actions">
                     <div class="level-action-dropdown">
                         <button class="btn btn-sm btn-detect" onclick="event.stopPropagation(); app.showProjectDetectMenu('${project.id}', this)" title="Detect Zones/Lines">
@@ -1613,6 +1631,8 @@ async ensureMainZonePrompt() {
         documents.forEach(docItem => {
             const documentElement = this.createDocumentTreeItem(docItem);
             container.appendChild(documentElement);
+            // Set up drag and drop for the new document item
+            // Removed old drag and drop setup - using professional controls now
         });
     }
 
@@ -1625,10 +1645,18 @@ async ensureMainZonePrompt() {
         const statusIcons = this.generateDocumentStatusIcons(docItem);
         
         documentDiv.innerHTML = `
-            <div class="tree-item-content" onclick="app.toggleDocument('${docItem.id}')">
+            <div class="tree-item-content" onclick="app.handleDocumentClick('${docItem.id}', event)">
                 <i class="fas fa-caret-right tree-toggle"></i>
                 <i class="fas fa-file-alt tree-icon"></i>
-                <span class="tree-text">${docItem.name}</span>
+                <span class="tree-text editable-text" onclick="event.stopPropagation(); app.startRename('document', '${docItem.id}', this)" title="Click to rename">${docItem.name}</span>
+                <div class="tree-reorder-controls">
+                    <button class="btn btn-xs btn-outline-secondary" onclick="event.stopPropagation(); app.moveItem('document', '${docItem.id}', 'up')" title="Move Up">
+                        <i class="fas fa-chevron-up"></i>
+                    </button>
+                    <button class="btn btn-xs btn-outline-secondary" onclick="event.stopPropagation(); app.moveItem('document', '${docItem.id}', 'down')" title="Move Down">
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                </div>
                 <div class="document-status-icons">${statusIcons}</div>
                 <div class="tree-actions level-actions">
                     <div class="level-action-dropdown">
@@ -1730,7 +1758,8 @@ async ensureMainZonePrompt() {
 
     async loadDocumentImages(documentId, container) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}`, {
+            // Add cache-busting parameter to ensure fresh data
+            const response = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}&_t=${Date.now()}`, {
                 headers: {
                     'Authorization': `Token ${this.authToken}`
                 }
@@ -1752,9 +1781,20 @@ async ensureMainZonePrompt() {
             return;
         }
 
+        // Debug: Check if images have document_id field
+        if (images.length > 0) {
+            const firstImage = images[0];
+            if (!firstImage.document_id) {
+                console.error('Images API response missing document_id field. Available fields:', Object.keys(firstImage));
+                console.error('First image data:', firstImage);
+            }
+        }
+
         images.forEach(image => {
             const imageElement = this.createImageTreeItem(image);
             container.appendChild(imageElement);
+            // Set up drag and drop for the new image item
+            // Removed old drag and drop setup - using professional controls now
         });
     }
 
@@ -1763,10 +1803,25 @@ async ensureMainZonePrompt() {
         imageDiv.className = 'tree-item image-item ms-4';
         imageDiv.dataset.imageId = image.id;
         
+        // Store document ID for easy access during reordering
+        if (image.document_id) {
+            imageDiv.dataset.documentId = image.document_id;
+        } else {
+            console.warn('No document_id found for image:', image.name, 'Available fields:', Object.keys(image));
+        }
+        
         imageDiv.innerHTML = `
-            <div class="tree-item-content" onclick="app.selectImage('${image.id}')">
+            <div class="tree-item-content" onclick="app.handleImageClick('${image.id}', event)">
                 <i class="fas fa-image tree-icon"></i>
-                <span class="tree-text">${image.name}</span>
+                <span class="tree-text editable-text" onclick="event.stopPropagation(); app.startRename('image', '${image.id}', this)" title="Click to rename">${image.name}</span>
+                <div class="tree-reorder-controls">
+                    <button class="btn btn-xs btn-outline-secondary" onclick="event.stopPropagation(); app.moveItem('image', '${image.id}', 'up')" title="Move Up">
+                        <i class="fas fa-chevron-up"></i>
+                    </button>
+                    <button class="btn btn-xs btn-outline-secondary" onclick="event.stopPropagation(); app.moveItem('image', '${image.id}', 'down')" title="Move Down">
+                        <i class="fas fa-chevron-down"></i>
+                    </button>
+                </div>
                 <div class="tree-actions">
                     <button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); app.deleteImage('${image.id}')" title="Delete Image">
                         <i class="fas fa-trash"></i>
@@ -2568,6 +2623,1441 @@ async ensureMainZonePrompt() {
         items.forEach(item => {
             item.classList.remove('drag-over', 'drag-insert-above', 'drag-insert-below');
         });
+    }
+
+    // Old Tree Drag and Drop Functionality - DISABLED
+    initializeTreeDragDrop() {
+        // Disabled in favor of professional controls (up/down arrows + edit structure modal)
+        return;
+    }
+
+    // Old drag and drop setup function - DISABLED  
+    setupTreeItemDragDrop(item) {
+        // Disabled - using professional controls instead
+        return;
+        
+        // Remove any existing listeners to avoid duplicates
+        const existingHandler = item._dragHandler;
+        if (existingHandler) {
+            item.removeEventListener('dragstart', existingHandler);
+        }
+        
+        // Add drag event listeners
+        const dragHandler = (e) => this.handleTreeDragStart(e);
+        item._dragHandler = dragHandler;
+        
+        item.addEventListener('dragstart', dragHandler);
+        item.addEventListener('dragover', (e) => this.handleTreeDragOver(e));
+        item.addEventListener('dragenter', (e) => this.handleTreeDragEnter(e));
+        item.addEventListener('dragleave', (e) => this.handleTreeDragLeave(e));
+        item.addEventListener('drop', (e) => this.handleTreeDrop(e));
+        item.addEventListener('dragend', (e) => this.handleTreeDragEnd(e));
+        
+        // Add mousedown event to distinguish between click and drag
+        item.addEventListener('mousedown', (e) => this.handleTreeMouseDown(e));
+        
+        // Prevent default drag behavior on the content element
+        const contentElement = item.querySelector('.tree-item-content');
+        if (contentElement) {
+            contentElement.addEventListener('dragstart', (e) => {
+                // Allow the parent item to handle the drag
+                e.preventDefault();
+            });
+        }
+    }
+
+    handleTreeMouseDown(e) {
+        // Track mouse position to detect drag vs click
+        this.mouseDownPos = { x: e.clientX, y: e.clientY };
+        this.mouseDownTime = Date.now();
+        
+        // Add mouse move and up listeners to detect drag intent
+        const handleMouseMove = (e) => {
+            const distance = Math.sqrt(
+                Math.pow(e.clientX - this.mouseDownPos.x, 2) + 
+                Math.pow(e.clientY - this.mouseDownPos.y, 2)
+            );
+            
+            // If moved more than 5 pixels, it's likely a drag
+            if (distance > 5) {
+                this.isDragIntent = true;
+            }
+        };
+        
+        const handleMouseUp = () => {
+            document.removeEventListener('mousemove', handleMouseMove);
+            document.removeEventListener('mouseup', handleMouseUp);
+            
+            // Reset drag intent after a short delay
+            setTimeout(() => {
+                this.isDragIntent = false;
+            }, 100);
+        };
+        
+        document.addEventListener('mousemove', handleMouseMove);
+        document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    // Smart click handlers that respect drag intent
+    handleDocumentClick(documentId, event) {
+        // If this was a drag intent, don't execute the click
+        if (this.isDragIntent) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+        }
+        
+        // Small delay to ensure drag detection has completed
+        setTimeout(() => {
+            if (!this.isDragIntent) {
+                this.toggleDocument(documentId);
+            }
+        }, 10);
+    }
+
+    handleImageClick(imageId, event) {
+        // If this was a drag intent, don't execute the click
+        if (this.isDragIntent) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+        }
+        
+        // Small delay to ensure drag detection has completed
+        setTimeout(() => {
+            if (!this.isDragIntent) {
+                this.selectImage(imageId);
+            }
+        }, 10);
+    }
+
+    handleTreeDragStart(e) {
+        // Stop click events from interfering with drag
+        e.stopPropagation();
+        
+        const item = e.currentTarget;
+        this.draggedTreeItem = {
+            element: item,
+            id: this.getTreeItemId(item),
+            type: this.getTreeItemType(item),
+            projectId: this.getTreeItemProjectId(item),
+            documentId: this.getTreeItemDocumentId(item)
+        };
+        
+        // Add dragging state
+        item.classList.add('dragging');
+        
+        // Create a smooth drag ghost image
+        this.createDragGhost(item, e);
+        
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/html', item.outerHTML);
+        
+        // Add body class for global drag state
+        document.body.classList.add('tree-dragging');
+    }
+
+    handleTreeDragOver(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const targetItem = e.currentTarget;
+        const targetType = this.getTreeItemType(targetItem);
+        
+        if (!this.isValidDropTarget(targetItem)) {
+            e.dataTransfer.dropEffect = 'none';
+            this.clearSlidingAnimations();
+            return;
+        }
+        
+        e.dataTransfer.dropEffect = 'move';
+        
+        // Clear previous indicators
+        this.clearTreeDragVisualIndicators();
+        
+        const rect = targetItem.getBoundingClientRect();
+        const midpoint = rect.top + rect.height / 2;
+        const mouseY = e.clientY;
+        
+        const insertAbove = mouseY < midpoint;
+        this.treeDropPosition = insertAbove ? 'above' : 'below';
+        
+        // Add drop indicators
+        if (insertAbove) {
+            targetItem.classList.add('tree-drag-insert-above');
+        } else {
+            targetItem.classList.add('tree-drag-insert-below');
+        }
+        
+        // Apply smooth sliding animations
+        this.applySlidingAnimations(targetItem, insertAbove);
+    }
+
+    applySlidingAnimations(targetItem, insertAbove) {
+        // Clear any existing sliding animations
+        this.clearSlidingAnimations();
+        
+        // Get all sibling items at the same level
+        const siblings = this.getSiblingItems(targetItem);
+        const targetIndex = siblings.indexOf(targetItem);
+        const draggedElement = this.draggedTreeItem.element;
+        const draggedIndex = siblings.indexOf(draggedElement);
+        
+        if (draggedIndex === -1 || targetIndex === -1) return;
+        
+        // Calculate new position for dragged item
+        let newIndex = insertAbove ? targetIndex : targetIndex + 1;
+        
+        // Apply sliding transformations
+        siblings.forEach((item, index) => {
+            if (item === draggedElement) return; // Skip the dragged item
+            
+            let translateY = 0;
+            
+            if (draggedIndex < newIndex) {
+                // Dragging down: items between old and new position slide up
+                if (index > draggedIndex && index < newIndex) {
+                    translateY = -draggedElement.offsetHeight - 4; // Item height + margin
+                }
+            } else {
+                // Dragging up: items between new and old position slide down
+                if (index >= newIndex && index < draggedIndex) {
+                    translateY = draggedElement.offsetHeight + 4; // Item height + margin
+                }
+            }
+            
+            if (translateY !== 0) {
+                item.style.transform = `translateY(${translateY}px)`;
+                item.style.transition = 'transform 0.3s ease';
+                item.classList.add('sliding');
+            }
+        });
+    }
+
+    getSiblingItems(item) {
+        const itemType = this.getTreeItemType(item);
+        
+        if (itemType === 'project') {
+            return Array.from(document.querySelectorAll('.project-item'));
+        } else if (itemType === 'document') {
+            // Get documents within the same project
+            const projectItem = item.closest('.project-item');
+            return Array.from(projectItem.querySelectorAll('.document-item'));
+        } else if (itemType === 'image') {
+            // Get images within the same document
+            const documentItem = item.closest('.document-item');
+            return Array.from(documentItem.querySelectorAll('.image-item'));
+        }
+        
+        return [];
+    }
+
+    clearSlidingAnimations() {
+        const slidingItems = document.querySelectorAll('.sliding');
+        slidingItems.forEach(item => {
+            item.style.transform = '';
+            item.style.transition = '';
+            item.classList.remove('sliding');
+        });
+    }
+
+    handleTreeDragEnter(e) {
+        e.preventDefault();
+        e.stopPropagation();
+    }
+
+    handleTreeDragLeave(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        // Only clear if we're actually leaving the item
+        if (!e.currentTarget.contains(e.relatedTarget)) {
+            e.currentTarget.classList.remove('tree-drag-insert-above', 'tree-drag-insert-below');
+            // Clear sliding animations when leaving the drag area
+            this.clearSlidingAnimations();
+        }
+    }
+
+    async handleTreeDrop(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const targetItem = e.currentTarget;
+        this.clearTreeDragVisualIndicators();
+        
+        if (!this.isValidDropTarget(targetItem)) {
+            return;
+        }
+        
+        const targetId = this.getTreeItemId(targetItem);
+        const targetType = this.getTreeItemType(targetItem);
+        
+        if (this.draggedTreeItem.id === targetId) {
+            return; // Can't drop on self
+        }
+        
+        try {
+            // Add success animation before refresh
+            this.addMoveSuccessAnimation(this.draggedTreeItem.element);
+            
+            await this.performTreeMove(targetItem, targetType);
+            await this.loadProjects(); // Refresh the tree
+            
+            this.showAlert('Item moved successfully!', 'success');
+        } catch (error) {
+            console.error('Error moving tree item:', error);
+            this.showAlert('Error moving item: ' + error.message, 'error');
+        }
+    }
+
+    handleTreeDragEnd(e) {
+        const item = e.currentTarget;
+        item.classList.remove('dragging');
+        this.clearTreeDragVisualIndicators();
+        this.clearSlidingAnimations();
+        
+        // Remove global drag state
+        document.body.classList.remove('tree-dragging');
+        
+        // Clean up
+        this.draggedTreeItem = null;
+        this.treeDropPosition = null;
+        
+        // Remove any temporary styles
+        if (this.dragGhost) {
+            this.dragGhost.remove();
+            this.dragGhost = null;
+        }
+    }
+
+    createDragGhost(item, e) {
+        // Create a custom drag ghost for smoother visuals
+        const ghost = item.cloneNode(true);
+        ghost.style.position = 'absolute';
+        ghost.style.top = '-1000px';
+        ghost.style.left = '-1000px';
+        ghost.style.width = item.offsetWidth + 'px';
+        ghost.style.opacity = '0.8';
+        ghost.style.transform = 'rotate(3deg)';
+        ghost.style.boxShadow = '0 8px 24px rgba(0,0,0,0.3)';
+        ghost.style.borderRadius = '6px';
+        ghost.style.border = '2px solid #0066cc';
+        ghost.style.backgroundColor = '#f8f9fa';
+        ghost.style.zIndex = '9999';
+        
+        document.body.appendChild(ghost);
+        this.dragGhost = ghost;
+        
+        // Set the custom drag image
+        if (e.dataTransfer.setDragImage) {
+            e.dataTransfer.setDragImage(ghost, e.offsetX, e.offsetY);
+        }
+    }
+
+    addMoveSuccessAnimation(element) {
+        // Add success animation
+        element.classList.add('move-success');
+        
+        // Remove the class after animation completes
+        setTimeout(() => {
+            element.classList.remove('move-success');
+        }, 600);
+    }
+
+    clearTreeDragVisualIndicators() {
+        const allItems = document.querySelectorAll('.tree-item');
+        allItems.forEach(item => {
+            item.classList.remove('tree-drag-insert-above', 'tree-drag-insert-below');
+        });
+    }
+
+    // Helper methods for tree drag and drop
+    getTreeItemId(item) {
+        if (item.classList.contains('project-item')) {
+            return item.dataset.projectId;
+        } else if (item.classList.contains('document-item')) {
+            return item.dataset.documentId;
+        } else if (item.classList.contains('image-item')) {
+            return item.dataset.imageId;
+        }
+        return null;
+    }
+
+    getTreeItemType(item) {
+        if (item.classList.contains('project-item')) {
+            return 'project';
+        } else if (item.classList.contains('document-item')) {
+            return 'document';
+        } else if (item.classList.contains('image-item')) {
+            return 'image';
+        }
+        return null;
+    }
+
+    getTreeItemProjectId(item) {
+        if (item.classList.contains('project-item')) {
+            return item.dataset.projectId;
+        } else if (item.classList.contains('document-item')) {
+            // Find parent project
+            const projectItem = item.closest('.project-item');
+            return projectItem ? projectItem.dataset.projectId : null;
+        } else if (item.classList.contains('image-item')) {
+            // Find parent project
+            const projectItem = item.closest('.project-item');
+            return projectItem ? projectItem.dataset.projectId : null;
+        }
+        return null;
+    }
+
+    getTreeItemDocumentId(item) {
+        if (item.classList.contains('document-item')) {
+            return item.dataset.documentId;
+        } else if (item.classList.contains('image-item')) {
+            // Find parent document
+            const documentItem = item.closest('.document-item');
+            return documentItem ? documentItem.dataset.documentId : null;
+        }
+        return null;
+    }
+
+    isValidDropTarget(targetItem) {
+        if (!this.draggedTreeItem) return false;
+        
+        const draggedType = this.draggedTreeItem.type;
+        const targetType = this.getTreeItemType(targetItem);
+        
+        // Define valid drop combinations
+        const validCombinations = {
+            'project': ['project'], // Projects can be dropped on other projects (reordering)
+            'document': ['document', 'project'], // Documents can be dropped on documents (reordering) or projects (moving)
+            'image': ['image', 'document'] // Images can be dropped on images (reordering) or documents (moving)
+        };
+        
+        return validCombinations[draggedType]?.includes(targetType) || false;
+    }
+
+    async performTreeMove(targetItem, targetType) {
+        const draggedType = this.draggedTreeItem.type;
+        const draggedId = this.draggedTreeItem.id;
+        const targetId = this.getTreeItemId(targetItem);
+        
+        if (draggedType === 'project' && targetType === 'project') {
+            // Reorder projects
+            await this.reorderProjects(draggedId, targetId);
+        } else if (draggedType === 'document' && targetType === 'document') {
+            // Reorder documents within same project
+            await this.reorderDocuments(draggedId, targetId);
+        } else if (draggedType === 'document' && targetType === 'project') {
+            // Move document to different project
+            await this.moveDocumentToProject(draggedId, targetId);
+        } else if (draggedType === 'image' && targetType === 'image') {
+            // Reorder images within same document
+            await this.reorderImages(draggedId, targetId);
+        } else if (draggedType === 'image' && targetType === 'document') {
+            // Move image to different document
+            await this.moveImageToDocument(draggedId, targetId);
+        }
+    }
+
+    // API methods for reordering and moving
+    async reorderProjects(draggedId, targetId) {
+        // Get all projects to calculate new orders
+        const projectItems = Array.from(document.querySelectorAll('.project-item'));
+        const projects = projectItems.map((item, index) => ({
+            id: item.dataset.projectId,
+            order: index
+        }));
+        
+        // Find current positions
+        const draggedIndex = projects.findIndex(p => p.id === draggedId);
+        const targetIndex = projects.findIndex(p => p.id === targetId);
+        
+        if (draggedIndex === -1 || targetIndex === -1) return;
+        
+        // Remove dragged project and insert at new position
+        const [draggedProject] = projects.splice(draggedIndex, 1);
+        const insertIndex = this.treeDropPosition === 'above' ? targetIndex : targetIndex + 1;
+        projects.splice(insertIndex, 0, draggedProject);
+        
+        // Update orders
+        projects.forEach((project, index) => {
+            project.order = index;
+        });
+        
+        // Send to API
+        const response = await fetch('/api/projects/reorder/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Token ${localStorage.getItem('authToken')}`
+            },
+            body: JSON.stringify({ projects })
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to reorder projects');
+        }
+    }
+
+    async reorderDocuments(draggedId, targetId) {
+        const projectId = this.draggedTreeItem.projectId;
+        if (!projectId) throw new Error('Project ID not found');
+        
+        // Get all document items within the same project
+        const projectElement = document.querySelector(`[data-project-id="${projectId}"]`);
+        const documentItems = Array.from(projectElement.querySelectorAll('.document-item'));
+        
+        const documents = documentItems.map((item, index) => ({
+            id: item.dataset.documentId,
+            reading_order: index
+        }));
+        
+        // Find positions and reorder
+        const draggedIndex = documents.findIndex(d => d.id === draggedId);
+        const targetIndex = documents.findIndex(d => d.id === targetId);
+        
+        if (draggedIndex === -1 || targetIndex === -1) return;
+        
+        const [draggedDocument] = documents.splice(draggedIndex, 1);
+        const insertIndex = this.treeDropPosition === 'above' ? targetIndex : targetIndex + 1;
+        documents.splice(insertIndex, 0, draggedDocument);
+        
+        // Update reading orders
+        documents.forEach((document, index) => {
+            document.reading_order = index;
+        });
+        
+        // Send to API
+        const response = await fetch('/api/documents/reorder/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Token ${localStorage.getItem('authToken')}`
+            },
+            body: JSON.stringify({ 
+                documents,
+                project_id: projectId
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to reorder documents');
+        }
+    }
+
+    async moveDocumentToProject(documentId, targetProjectId) {
+        const response = await fetch(`/api/projects/${targetProjectId}/move_document/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Token ${localStorage.getItem('authToken')}`
+            },
+            body: JSON.stringify({ 
+                document_id: documentId,
+                order: 0 // Place at beginning for now
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to move document');
+        }
+    }
+
+    async reorderImages(draggedId, targetId) {
+        const documentId = this.draggedTreeItem.documentId;
+        if (!documentId) throw new Error('Document ID not found');
+        
+        // Get all image items within the same document
+        const documentElement = document.querySelector(`[data-document-id="${documentId}"]`);
+        const imageItems = Array.from(documentElement.querySelectorAll('.image-item'));
+        
+        const images = imageItems.map((item, index) => ({
+            id: item.dataset.imageId,
+            order: index
+        }));
+        
+        // Find positions and reorder
+        const draggedIndex = images.findIndex(i => i.id === draggedId);
+        const targetIndex = images.findIndex(i => i.id === targetId);
+        
+        if (draggedIndex === -1 || targetIndex === -1) return;
+        
+        const [draggedImage] = images.splice(draggedIndex, 1);
+        const insertIndex = this.treeDropPosition === 'above' ? targetIndex : targetIndex + 1;
+        images.splice(insertIndex, 0, draggedImage);
+        
+        // Update orders
+        images.forEach((image, index) => {
+            image.order = index;
+        });
+        
+        // Send to API
+        const response = await fetch('/api/images/reorder/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Token ${localStorage.getItem('authToken')}`
+            },
+            body: JSON.stringify({ 
+                images,
+                document_id: documentId
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to reorder images');
+        }
+    }
+
+    async moveImageToDocument(imageId, targetDocumentId) {
+        const response = await fetch(`/api/documents/${targetDocumentId}/move_image/`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Token ${localStorage.getItem('authToken')}`
+            },
+            body: JSON.stringify({ 
+                image_id: imageId,
+                order: 0 // Place at beginning for now
+            })
+        });
+        
+        if (!response.ok) {
+            throw new Error('Failed to move image');
+        }
+    }
+
+    // New Professional Interface Methods
+
+    startRename(type, id, element) {
+        const currentName = element.textContent;
+        
+        // Create input field
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = currentName;
+        input.className = 'form-control form-control-sm tree-rename-input';
+        input.style.fontSize = '14px';
+        input.style.padding = '2px 6px';
+        
+        // Replace text with input
+        element.style.display = 'none';
+        element.parentNode.insertBefore(input, element.nextSibling);
+        
+        // Focus and select all text
+        input.focus();
+        input.select();
+        
+        // Handle save on Enter or blur
+        const saveRename = async () => {
+            const newName = input.value.trim();
+            if (newName && newName !== currentName) {
+                try {
+                    await this.saveRename(type, id, newName);
+                    element.textContent = newName;
+                    this.showAlert(`${type.charAt(0).toUpperCase() + type.slice(1)} renamed successfully!`, 'success');
+                } catch (error) {
+                    this.showAlert(`Failed to rename ${type}: ${error.message}`, 'error');
+                }
+            }
+            
+            // Restore original element
+            element.style.display = '';
+            input.remove();
+        };
+        
+        // Handle cancel on Escape
+        const cancelRename = () => {
+            element.style.display = '';
+            input.remove();
+        };
+        
+        input.addEventListener('blur', saveRename);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                saveRename();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                cancelRename();
+            }
+        });
+    }
+
+    async saveRename(type, id, newName) {
+        const endpoints = {
+            'project': `/api/projects/${id}/`,
+            'document': `/api/documents/${id}/`,
+            'image': `/api/images/${id}/`
+        };
+        
+        const response = await fetch(endpoints[type], {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Token ${localStorage.getItem('authToken')}`
+            },
+            body: JSON.stringify({ name: newName })
+        });
+        
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Failed to rename item');
+        }
+        
+        return response.json();
+    }
+
+    async moveItem(type, id, direction) {
+        try {
+            await this.performSimpleMove(type, id, direction);
+            
+            // Only reload projects for project moves to preserve expanded state
+            if (type === 'project') {
+                await this.loadProjects();
+            }
+            // For documents and images, the order change will be visible on next expand
+            
+            this.showAlert(`${type.charAt(0).toUpperCase() + type.slice(1)} moved ${direction} successfully!`, 'success');
+        } catch (error) {
+            this.showAlert(`Failed to move ${type}: ${error.message}`, 'error');
+        }
+    }
+
+    async performSimpleMove(type, id, direction) {
+        // Get current siblings and find positions
+        const siblings = this.getCurrentSiblings(type, id);
+        
+        if (!siblings || siblings.length <= 1) {
+            return;
+        }
+        
+        const currentIndex = siblings.findIndex(item => this.getItemId(item, type) === id);
+        
+        if (currentIndex === -1) {
+            return;
+        }
+        
+        let newIndex;
+        if (direction === 'up') {
+            newIndex = Math.max(0, currentIndex - 1);
+        } else {
+            newIndex = Math.min(siblings.length - 1, currentIndex + 1);
+        }
+        
+        if (newIndex === currentIndex) return; // No movement needed
+        
+        // Reorder the array
+        const [movedItem] = siblings.splice(currentIndex, 1);
+        siblings.splice(newIndex, 0, movedItem);
+        
+        // Send to appropriate API
+        await this.sendReorderData(type, siblings, id);
+    }
+
+    getCurrentSiblings(type, id) {
+        switch (type) {
+            case 'project':
+                return Array.from(document.querySelectorAll('.project-item'));
+            case 'document':
+                const projectId = this.getProjectIdForDocument(id);
+                const projectElement = document.querySelector(`[data-project-id="${projectId}"]`);
+                return Array.from(projectElement.querySelectorAll('.document-item'));
+            case 'image':
+                const documentId = this.getDocumentIdForImage(id);
+                const documentElement = document.querySelector(`[data-document-id="${documentId}"]`);
+                const imageItems = documentElement ? Array.from(documentElement.querySelectorAll('.image-item')) : [];
+                return imageItems;
+            default:
+                return [];
+        }
+    }
+
+    getItemId(element, type) {
+        switch (type) {
+            case 'project': return element.dataset.projectId;
+            case 'document': return element.dataset.documentId;
+            case 'image': return element.dataset.imageId;
+            default: return null;
+        }
+    }
+
+    getProjectIdForDocument(documentId) {
+        const documentElement = document.querySelector(`[data-document-id="${documentId}"]`);
+        return documentElement?.closest('.project-item')?.dataset.projectId;
+    }
+
+    getDocumentIdForImage(imageId) {
+        const imageElement = document.querySelector(`[data-image-id="${imageId}"]`);
+        
+        // First try to get document ID directly from the image element
+        if (imageElement?.dataset.documentId) {
+            return imageElement.dataset.documentId;
+        }
+        
+        // Fallback to finding the closest document item
+        const documentId = imageElement?.closest('.document-item')?.dataset.documentId;
+        if (!documentId) {
+            console.error('Could not find document ID for image:', imageId, 'Image element:', imageElement);
+        }
+        return documentId;
+    }
+
+    isValidUUID(uuid) {
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+        return uuidRegex.test(uuid);
+    }
+
+    async sendReorderData(type, siblings, movedItemId) {
+        switch (type) {
+            case 'project':
+                const projects = siblings.map((item, index) => ({
+                    id: item.dataset.projectId,
+                    order: index
+                }));
+                
+                const projectResponse = await fetch('/api/projects/reorder/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${localStorage.getItem('authToken')}`
+                    },
+                    body: JSON.stringify({ projects })
+                });
+                
+                if (!projectResponse.ok) throw new Error('Failed to reorder projects');
+                break;
+                
+            case 'document':
+                const projectId = this.getProjectIdForDocument(movedItemId);
+                const documents = siblings.map((item, index) => ({
+                    id: item.dataset.documentId,
+                    reading_order: index
+                }));
+                
+                console.log('Document reorder data:', { documents, project_id: projectId });
+                console.log('ProjectId for document', movedItemId, ':', projectId);
+                console.log('Documents array:', documents);
+                
+                const documentResponse = await fetch('/api/documents/reorder/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${localStorage.getItem('authToken')}`
+                    },
+                    body: JSON.stringify({ documents, project_id: projectId })
+                });
+                
+                if (!documentResponse.ok) {
+                    const errorText = await documentResponse.text();
+                    console.error('Document reorder error:', errorText);
+                    throw new Error('Failed to reorder documents');
+                }
+                break;
+                
+            case 'image':
+                const documentId = this.getDocumentIdForImage(movedItemId);
+                const images = siblings.map((item, index) => ({
+                    id: item.dataset.imageId,
+                    order: index
+                }));
+                
+                if (!documentId) {
+                    throw new Error('Document ID not found for image reordering');
+                }
+                
+                if (!this.isValidUUID(documentId)) {
+                    console.error('Invalid document ID:', documentId, 'for image:', movedItemId);
+                    console.error('Image element:', document.querySelector(`[data-image-id="${movedItemId}"]`));
+                    throw new Error(`Invalid document ID format: ${documentId}`);
+                }
+                
+                const imageResponse = await fetch('/api/images/reorder/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${localStorage.getItem('authToken')}`
+                    },
+                    body: JSON.stringify({ images, document_id: documentId })
+                });
+                
+                if (!imageResponse.ok) {
+                    const errorData = await imageResponse.json();
+                    throw new Error(`Failed to reorder images: ${errorData.error || 'Unknown error'}`);
+                }
+                break;
+        }
+    }
+
+    showEditStructureModal() {
+        // Create and show the edit structure modal
+        const modal = document.createElement('div');
+        modal.className = 'modal fade';
+        modal.id = 'editStructureModal';
+        modal.setAttribute('tabindex', '-1');
+        
+        modal.innerHTML = `
+            <div class="modal-dialog modal-xl">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">
+                            <i class="fas fa-edit me-2"></i>Edit Project Structure
+                        </h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <div class="structure-section">
+                                    <h6 class="section-title">
+                                        <i class="fas fa-folder text-warning"></i> Projects
+                                    </h6>
+                                    <div id="structureProjects" class="structure-list"></div>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="structure-section">
+                                    <h6 class="section-title">
+                                        <i class="fas fa-file-alt text-primary"></i> Documents
+                                    </h6>
+                                    <div id="structureDocuments" class="structure-list">
+                                        <div class="text-muted text-center p-3">Select a project to view documents</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="structure-section">
+                                    <h6 class="section-title">
+                                        <i class="fas fa-image text-success"></i> Images
+                                    </h6>
+                                    <div id="structureImages" class="structure-list">
+                                        <div class="text-muted text-center p-3">Select a document to view images</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                        <button type="button" class="btn btn-primary" onclick="app.saveStructureChanges()">Save Changes</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        document.body.appendChild(modal);
+        
+        // Initialize Bootstrap modal
+        const bsModal = new bootstrap.Modal(modal);
+        bsModal.show();
+        
+        // Load structure data
+        this.loadStructureData();
+        
+        // Clean up when modal is hidden
+        modal.addEventListener('hidden.bs.modal', () => {
+            modal.remove();
+        });
+    }
+
+    async loadStructureData() {
+        try {
+            const response = await fetch('/api/projects/', {
+                headers: {
+                    'Authorization': `Token ${localStorage.getItem('authToken')}`
+                }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                this.renderStructureProjects(data.results);
+            }
+        } catch (error) {
+            console.error('Error loading structure data:', error);
+        }
+    }
+
+    renderStructureProjects(projects) {
+        const container = document.getElementById('structureProjects');
+        container.innerHTML = '';
+        
+        projects.forEach(project => {
+            const projectItem = document.createElement('div');
+            projectItem.className = 'structure-item project-structure-item';
+            projectItem.dataset.projectId = project.id;
+            
+            projectItem.innerHTML = `
+                <div class="structure-item-content" onclick="app.selectStructureProject('${project.id}')">
+                    <i class="fas fa-folder structure-icon"></i>
+                    <span class="structure-text">${project.name}</span>
+                    <div class="structure-controls">
+                        <button class="btn btn-xs btn-outline-primary" onclick="event.stopPropagation(); app.structureMove('project', '${project.id}', 'up')" title="Move Up">
+                            <i class="fas fa-arrow-up"></i>
+                        </button>
+                        <button class="btn btn-xs btn-outline-primary" onclick="event.stopPropagation(); app.structureMove('project', '${project.id}', 'down')" title="Move Down">
+                            <i class="fas fa-arrow-down"></i>
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            container.appendChild(projectItem);
+        });
+    }
+
+    async selectStructureProject(projectId) {
+        // Highlight selected project
+        document.querySelectorAll('.project-structure-item').forEach(item => {
+            item.classList.remove('selected');
+        });
+        document.querySelector(`[data-project-id="${projectId}"]`).classList.add('selected');
+        
+        // Load documents for this project
+        try {
+            const response = await fetch(`/api/documents/?project=${projectId}`, {
+                headers: {
+                    'Authorization': `Token ${localStorage.getItem('authToken')}`
+                }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                this.renderStructureDocuments(data.results, projectId);
+            }
+        } catch (error) {
+            console.error('Error loading documents:', error);
+        }
+        
+        // Clear images section
+        document.getElementById('structureImages').innerHTML = '<div class="text-muted text-center p-3">Select a document to view images</div>';
+    }
+
+    renderStructureDocuments(documents, projectId) {
+        const container = document.getElementById('structureDocuments');
+        container.innerHTML = '';
+        
+        if (documents.length === 0) {
+            container.innerHTML = '<div class="text-muted text-center p-3">No documents in this project</div>';
+            return;
+        }
+        
+        documents.forEach(doc => {
+            const documentItem = document.createElement('div');
+            documentItem.className = 'structure-item document-structure-item';
+            documentItem.dataset.documentId = doc.id;
+            documentItem.dataset.projectId = projectId;
+            
+            documentItem.innerHTML = `
+                <div class="structure-item-content" onclick="app.selectStructureDocument('${doc.id}')">
+                    <i class="fas fa-file-alt structure-icon"></i>
+                    <span class="structure-text">${doc.name}</span>
+                    <div class="structure-controls">
+                        <button class="btn btn-xs btn-outline-primary" onclick="event.stopPropagation(); app.structureMove('document', '${doc.id}', 'up')" title="Move Up">
+                            <i class="fas fa-arrow-up"></i>
+                        </button>
+                        <button class="btn btn-xs btn-outline-primary" onclick="event.stopPropagation(); app.structureMove('document', '${doc.id}', 'down')" title="Move Down">
+                            <i class="fas fa-arrow-down"></i>
+                        </button>
+                        <button class="btn btn-xs btn-outline-warning" onclick="event.stopPropagation(); app.moveToProject('${doc.id}')" title="Move to Different Project">
+                            <i class="fas fa-exchange-alt"></i>
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            container.appendChild(documentItem);
+        });
+    }
+
+    async selectStructureDocument(documentId) {
+        // Highlight selected document
+        document.querySelectorAll('.document-structure-item').forEach(item => {
+            item.classList.remove('selected');
+        });
+        document.querySelector(`[data-document-id="${documentId}"]`).classList.add('selected');
+        
+        // Load images for this document
+        try {
+            const response = await fetch(`/api/images/?document=${documentId}&_t=${Date.now()}`, {
+                headers: {
+                    'Authorization': `Token ${localStorage.getItem('authToken')}`
+                }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                this.renderStructureImages(data.results, documentId);
+            }
+        } catch (error) {
+            console.error('Error loading images:', error);
+        }
+    }
+
+    renderStructureImages(images, documentId) {
+        const container = document.getElementById('structureImages');
+        container.innerHTML = '';
+        
+        if (images.length === 0) {
+            container.innerHTML = '<div class="text-muted text-center p-3">No images in this document</div>';
+            return;
+        }
+        
+        images.forEach(image => {
+            const imageItem = document.createElement('div');
+            imageItem.className = 'structure-item image-structure-item';
+            imageItem.dataset.imageId = image.id;
+            imageItem.dataset.documentId = documentId;
+            
+            imageItem.innerHTML = `
+                <div class="structure-item-content">
+                    <i class="fas fa-image structure-icon"></i>
+                    <span class="structure-text">${image.name}</span>
+                    <div class="structure-controls">
+                        <button class="btn btn-xs btn-outline-primary" onclick="app.structureMove('image', '${image.id}', 'up')" title="Move Up">
+                            <i class="fas fa-arrow-up"></i>
+                        </button>
+                        <button class="btn btn-xs btn-outline-primary" onclick="app.structureMove('image', '${image.id}', 'down')" title="Move Down">
+                            <i class="fas fa-arrow-down"></i>
+                        </button>
+                        <button class="btn btn-xs btn-outline-warning" onclick="app.moveToDocument('${image.id}')" title="Move to Different Document">
+                            <i class="fas fa-exchange-alt"></i>
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            container.appendChild(imageItem);
+        });
+    }
+
+    async structureMove(type, id, direction) {
+        try {
+            // Structure modal has different DOM, so we need custom logic
+            await this.performStructureMove(type, id, direction);
+            
+            // Refresh the current view
+            if (type === 'project') {
+                await this.loadStructureData();
+            } else if (type === 'document') {
+                const projectId = document.querySelector(`[data-document-id="${id}"]`).dataset.projectId;
+                await this.selectStructureProject(projectId);
+            } else if (type === 'image') {
+                const documentId = document.querySelector(`[data-image-id="${id}"]`).dataset.documentId;
+                await this.selectStructureDocument(documentId);
+            }
+            this.showAlert(`${type.charAt(0).toUpperCase() + type.slice(1)} moved ${direction}!`, 'success');
+        } catch (error) {
+            this.showAlert(`Failed to move ${type}: ${error.message}`, 'error');
+        }
+    }
+
+    async performStructureMove(type, id, direction) {
+        // Get siblings from structure modal
+        let siblings;
+        switch (type) {
+            case 'project':
+                siblings = Array.from(document.querySelectorAll('.project-structure-item'));
+                break;
+            case 'document':
+                siblings = Array.from(document.querySelectorAll('.document-structure-item'));
+                break;
+            case 'image':
+                siblings = Array.from(document.querySelectorAll('.image-structure-item'));
+                break;
+            default:
+                throw new Error(`Unknown type: ${type}`);
+        }
+        
+        if (!siblings || siblings.length <= 1) {
+            return;
+        }
+        
+        const currentIndex = siblings.findIndex(item => this.getItemId(item, type) === id);
+        
+        if (currentIndex === -1) {
+            return;
+        }
+        
+        let newIndex;
+        if (direction === 'up') {
+            newIndex = Math.max(0, currentIndex - 1);
+        } else {
+            newIndex = Math.min(siblings.length - 1, currentIndex + 1);
+        }
+        
+        if (newIndex === currentIndex) return; // No movement needed
+        
+        // Reorder the array
+        const [movedItem] = siblings.splice(currentIndex, 1);
+        siblings.splice(newIndex, 0, movedItem);
+        
+        // Send to appropriate API
+        await this.sendReorderData(type, siblings, id);
+    }
+
+    saveStructureChanges() {
+        // Close modal and refresh main tree
+        const modal = bootstrap.Modal.getInstance(document.getElementById('editStructureModal'));
+        modal.hide();
+        this.loadProjects();
+        this.showAlert('Structure changes saved!', 'success');
+    }
+
+    moveToProject(documentId) {
+        // Show modal to select target project
+        this.showMoveToProjectModal(documentId);
+    }
+
+    moveToDocument(imageId) {
+        console.log('moveToDocument called for image:', imageId);
+        // Show modal to select target document
+        this.showMoveToDocumentModal(imageId);
+    }
+
+    showMoveToProjectModal(documentId) {
+        const modal = document.createElement('div');
+        modal.className = 'modal fade';
+        modal.id = 'moveToProjectModal';
+        
+        modal.innerHTML = `
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Move Document to Project</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label class="form-label">Select Target Project:</label>
+                            <select class="form-select" id="targetProjectSelect">
+                                <option value="">Loading projects...</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="button" class="btn btn-primary" onclick="app.confirmMoveToProject('${documentId}')">Move Document</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        document.body.appendChild(modal);
+        const bsModal = new bootstrap.Modal(modal);
+        bsModal.show();
+        
+        // Load projects for selection
+        this.loadProjectsForMove(documentId);
+        
+        modal.addEventListener('hidden.bs.modal', () => modal.remove());
+    }
+
+    showMoveToDocumentModal(imageId) {
+        console.log('showMoveToDocumentModal called for image:', imageId);
+        
+        // Remove any existing modal first
+        const existingModal = document.getElementById('moveToDocumentModal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+        
+        const modal = document.createElement('div');
+        modal.className = 'modal fade';
+        modal.id = 'moveToDocumentModal';
+        
+        modal.innerHTML = `
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Move Image to Document</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="mb-3">
+                            <label class="form-label">Select Target Project:</label>
+                            <select class="form-select" id="targetProjectSelectForImage" onchange="app.loadDocumentsForImageMove(this.value)">
+                                <option value="">Select a project...</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Select Target Document:</label>
+                            <select class="form-select" id="targetDocumentSelect" disabled>
+                                <option value="">Select a project first...</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="button" class="btn btn-primary" onclick="app.confirmMoveToDocument('${imageId}')">Move Image</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        document.body.appendChild(modal);
+        
+        // Initialize Bootstrap modal
+        let bsModal;
+        try {
+            bsModal = new bootstrap.Modal(modal);
+            bsModal.show();
+            console.log('Modal shown successfully');
+        } catch (error) {
+            console.error('Error creating Bootstrap modal:', error);
+            // Fallback: show modal manually
+            modal.style.display = 'block';
+            modal.classList.add('show');
+        }
+        
+        // Load projects for selection
+        this.loadProjectsForImageMove();
+        
+        modal.addEventListener('hidden.bs.modal', () => modal.remove());
+    }
+
+    async loadProjectsForMove(excludeDocumentId) {
+        try {
+            const response = await fetch('/api/projects/', {
+                headers: { 'Authorization': `Token ${localStorage.getItem('authToken')}` }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                const select = document.getElementById('targetProjectSelect');
+                select.innerHTML = '<option value="">Select a project...</option>';
+                
+                data.results.forEach(project => {
+                    select.innerHTML += `<option value="${project.id}">${project.name}</option>`;
+                });
+            }
+        } catch (error) {
+            console.error('Error loading projects:', error);
+        }
+    }
+
+    async loadProjectsForImageMove() {
+        try {
+            const response = await fetch('/api/projects/', {
+                headers: { 'Authorization': `Token ${localStorage.getItem('authToken')}` }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                const select = document.getElementById('targetProjectSelectForImage');
+                select.innerHTML = '<option value="">Select a project...</option>';
+                
+                data.results.forEach(project => {
+                    select.innerHTML += `<option value="${project.id}">${project.name}</option>`;
+                });
+            }
+        } catch (error) {
+            console.error('Error loading projects:', error);
+        }
+    }
+
+    async loadDocumentsForImageMove(projectId) {
+        const select = document.getElementById('targetDocumentSelect');
+        
+        if (!projectId) {
+            select.innerHTML = '<option value="">Select a project first...</option>';
+            select.disabled = true;
+            return;
+        }
+        
+        try {
+            const response = await fetch(`/api/documents/?project=${projectId}`, {
+                headers: { 'Authorization': `Token ${localStorage.getItem('authToken')}` }
+            });
+            
+            if (response.ok) {
+                const data = await response.json();
+                select.innerHTML = '<option value="">Select a document...</option>';
+                
+                data.results.forEach(doc => {
+                    select.innerHTML += `<option value="${doc.id}">${doc.name}</option>`;
+                });
+                
+                select.disabled = false;
+            }
+        } catch (error) {
+            console.error('Error loading documents:', error);
+        }
+    }
+
+    async confirmMoveToProject(documentId) {
+        const targetProjectId = document.getElementById('targetProjectSelect').value;
+        
+        if (!targetProjectId) {
+            this.showAlert('Please select a target project', 'warning');
+            return;
+        }
+        
+        try {
+            const response = await fetch(`/api/projects/${targetProjectId}/move_document/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${localStorage.getItem('authToken')}`
+                },
+                body: JSON.stringify({ document_id: documentId })
+            });
+            
+            if (response.ok) {
+                this.showAlert('Document moved successfully!', 'success');
+                const modal = bootstrap.Modal.getInstance(document.getElementById('moveToProjectModal'));
+                modal.hide();
+                this.loadStructureData(); // Refresh structure modal
+                this.loadProjects(); // Refresh main tree
+            } else {
+                const errorData = await response.json();
+                this.showAlert(`Failed to move document: ${errorData.error}`, 'error');
+            }
+        } catch (error) {
+            this.showAlert('Failed to move document', 'error');
+        }
+    }
+
+    async confirmMoveToDocument(imageId) {
+        const targetDocumentId = document.getElementById('targetDocumentSelect').value;
+        
+        if (!targetDocumentId) {
+            this.showAlert('Please select a target document', 'warning');
+            return;
+        }
+        
+        try {
+            const response = await fetch(`/api/documents/${targetDocumentId}/move_image/`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${localStorage.getItem('authToken')}`
+                },
+                body: JSON.stringify({ image_id: imageId })
+            });
+            
+            if (response.ok) {
+                this.showAlert('Image moved successfully!', 'success');
+                const modal = bootstrap.Modal.getInstance(document.getElementById('moveToDocumentModal'));
+                modal.hide();
+                
+                // Refresh structure modal views
+                const currentProjectId = document.querySelector('.project-structure-item.selected')?.dataset.projectId;
+                const currentDocumentId = document.querySelector('.document-structure-item.selected')?.dataset.documentId;
+                
+                if (currentProjectId) {
+                    await this.selectStructureProject(currentProjectId);
+                    if (currentDocumentId) {
+                        await this.selectStructureDocument(currentDocumentId);
+                    }
+                }
+            } else {
+                const errorData = await response.json();
+                this.showAlert(`Failed to move image: ${errorData.error}`, 'error');
+            }
+        } catch (error) {
+            console.error('Move image error:', error);
+            this.showAlert('Failed to move image', 'error');
+        }
     }
 
     async reorderTranscriptions(draggedId, targetId, insertAbove = false) {
@@ -7962,6 +9452,27 @@ function toggleAllTranscriptionLineTypes(selectAll) {
 
 function startSelectedZoneTranscription() {
     app.startSelectedZoneTranscription();
+}
+
+// Structure modal functions
+function moveToDocument(imageId) {
+    app.moveToDocument(imageId);
+}
+
+function moveToProject(documentId) {
+    app.moveToProject(documentId);
+}
+
+function confirmMoveToProject(documentId) {
+    app.confirmMoveToProject(documentId);
+}
+
+function confirmMoveToDocument(imageId) {
+    app.confirmMoveToDocument(imageId);
+}
+
+function loadDocumentsForImageMove(projectId) {
+    app.loadDocumentsForImageMove(projectId);
 }
 
 function toggleCustomZones(enabled) {

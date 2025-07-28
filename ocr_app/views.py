@@ -18,6 +18,7 @@ from django.views import View
 from django.conf import settings
 from django.utils import timezone
 from django.db.models import Q, Count
+from django.db import transaction, models
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
 from django.core.paginator import Paginator
@@ -26,7 +27,7 @@ from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.parsers import MultiPartParser, FormParser, FileUploadParser, JSONParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser, FileUploadParser
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.authtoken.models import Token
 from django.views.decorators.csrf import csrf_exempt
@@ -215,6 +216,88 @@ class ProjectViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(owner=self.request.user)
     
+    @action(detail=False, methods=['post'])
+    def reorder(self, request):
+        """Reorder projects for the current user"""
+        project_orders = request.data.get('projects', [])
+        if not project_orders:
+            return Response({'error': 'Projects data required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Use atomic transaction for consistency
+        try:
+            with transaction.atomic():
+                user = request.user
+                projects_to_update = []
+                
+                for project_data in project_orders:
+                    project_id = project_data.get('id')
+                    order = project_data.get('order')
+                    
+                    if project_id is not None and order is not None:
+                        try:
+                            # Only allow reordering owned projects
+                            project = Project.objects.get(id=project_id, owner=user)
+                            project.order = order
+                            projects_to_update.append(project)
+                        except Project.DoesNotExist:
+                            continue
+                
+                # Bulk update all projects at once
+                if projects_to_update:
+                    Project.objects.bulk_update(projects_to_update, ['order'])
+        
+        except Exception as e:
+            return Response({'error': f'Failed to reorder projects: {str(e)}'}, 
+                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        return Response({'message': 'Project order updated successfully'})
+    
+    @action(detail=True, methods=['post'])
+    def move_document(self, request, pk=None):
+        """Move a document from another project to this project"""
+        try:
+            target_project = self.get_object()
+            document_id = request.data.get('document_id')
+            new_order = request.data.get('order', 0)
+            
+            if not document_id:
+                return Response({'error': 'Document ID required'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Get the document and check permissions
+            try:
+                document = Document.objects.get(id=document_id)
+                user = request.user
+                
+                # Check if user can edit the source project
+                source_project = document.project
+                if not (source_project.owner == user or 
+                       source_project.projectpermission_set.filter(
+                           user=user, permission__in=['edit', 'admin']
+                       ).exists()):
+                    return Response({'error': 'Permission denied for source project'}, 
+                                  status=status.HTTP_403_FORBIDDEN)
+                
+                # Check if user can edit the target project
+                if not (target_project.owner == user or 
+                       target_project.projectpermission_set.filter(
+                           user=user, permission__in=['edit', 'admin']
+                       ).exists()):
+                    return Response({'error': 'Permission denied for target project'}, 
+                                  status=status.HTTP_403_FORBIDDEN)
+                
+                # Move the document
+                document.project = target_project
+                document.reading_order = new_order
+                document.save()
+                
+                return Response({'message': 'Document moved successfully'})
+                
+            except Document.DoesNotExist:
+                return Response({'error': 'Document not found'}, status=status.HTTP_404_NOT_FOUND)
+                
+        except Project.DoesNotExist:
+            return Response({'error': 'Target project not found'}, status=status.HTTP_404_NOT_FOUND)
+
     @action(detail=False, methods=['delete'])
     def bulk_delete(self, request):
         """Delete multiple projects"""
@@ -355,6 +438,136 @@ class DocumentViewSet(viewsets.ModelViewSet):
             
         return queryset
     
+    @action(detail=False, methods=['post'])
+    def reorder(self, request):
+        """Reorder documents within a project"""
+        document_orders = request.data.get('documents', [])
+        project_id = request.data.get('project_id')
+        
+        # Debug logging
+        print(f"Document reorder request data: {request.data}")
+        print(f"Document orders: {document_orders}")
+        print(f"Project ID: {project_id}")
+        
+        if not document_orders or not project_id:
+            return Response({'error': 'Documents data and project_id required'}, 
+                          status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check project permissions
+        try:
+            project = Project.objects.get(id=project_id)
+            user = request.user
+            if not (project.owner == user or 
+                   project.projectpermission_set.filter(
+                       user=user, permission__in=['edit', 'admin']
+                   ).exists()):
+                return Response({'error': 'Permission denied'}, 
+                              status=status.HTTP_403_FORBIDDEN)
+        except Project.DoesNotExist:
+            return Response({'error': 'Project not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Use atomic transaction to avoid any potential constraint violations
+        try:
+            with transaction.atomic():
+                # Update document orders using bulk operations
+                documents_to_update = []
+                for doc_data in document_orders:
+                    document_id = doc_data.get('id')
+                    reading_order = doc_data.get('reading_order')
+                    
+                    if document_id is not None and reading_order is not None:
+                        try:
+                            document = Document.objects.get(id=document_id, project=project)
+                            document.reading_order = reading_order
+                            documents_to_update.append(document)
+                        except Document.DoesNotExist:
+                            continue
+                
+                # Bulk update all documents at once
+                if documents_to_update:
+                    Document.objects.bulk_update(documents_to_update, ['reading_order'])
+        
+        except Exception as e:
+            return Response({'error': f'Failed to reorder documents: {str(e)}'}, 
+                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        return Response({'message': 'Document order updated successfully'})
+    
+    @action(detail=True, methods=['post'])
+    def move_image(self, request, pk=None):
+        """Move an image from another document to this document"""
+        try:
+            target_document = self.get_object()
+            image_id = request.data.get('image_id')
+            new_order = request.data.get('order', 0)
+            
+            if not image_id:
+                return Response({'error': 'Image ID required'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Get the image and check permissions
+            try:
+                image = Image.objects.get(id=image_id)
+                user = request.user
+                
+                # Check if user can edit the source document
+                source_document = image.document
+                if not (source_document.project.owner == user or 
+                       source_document.project.projectpermission_set.filter(
+                           user=user, permission__in=['edit', 'admin']
+                       ).exists()):
+                    return Response({'error': 'Permission denied for source document'}, 
+                                  status=status.HTTP_403_FORBIDDEN)
+                
+                # Check if user can edit the target document
+                if not (target_document.project.owner == user or 
+                       target_document.project.projectpermission_set.filter(
+                           user=user, permission__in=['edit', 'admin']
+                       ).exists()):
+                    return Response({'error': 'Permission denied for target document'}, 
+                                  status=status.HTTP_403_FORBIDDEN)
+                
+                # Move the image using atomic transaction to avoid constraint violations
+                with transaction.atomic():
+                    # Get existing images in target document (excluding the one we're moving)
+                    target_images = list(Image.objects.filter(document=target_document).exclude(id=image.id).order_by('order'))
+                    
+                    # Step 1: Set image to a safe temporary order and update document
+                    max_order_in_target = max([img.order for img in target_images], default=-1)
+                    temp_order = max_order_in_target + 1000
+                    image.order = temp_order
+                    image.document = target_document
+                    image.save(update_fields=['document', 'order'])
+                    
+                    # Determine the insertion position
+                    if new_order is not None:
+                        insert_position = min(new_order, len(target_images))
+                    else:
+                        insert_position = len(target_images)  # Put at the end
+                    
+                    # Insert the moved image at the correct position
+                    target_images.insert(insert_position, image)
+                    
+                    # Step 2: Set all images to high temporary orders first
+                    max_temp_order = len(target_images) + 2000
+                    for i, img in enumerate(target_images):
+                        temp_order = max_temp_order + i
+                        if img.order != temp_order:
+                            img.order = temp_order
+                            img.save(update_fields=['order'])
+                    
+                    # Step 3: Set correct sequential orders
+                    for i, img in enumerate(target_images):
+                        img.order = i
+                        img.save(update_fields=['order'])
+                
+                return Response({'message': 'Image moved successfully'})
+                
+            except Image.DoesNotExist:
+                return Response({'error': 'Image not found'}, status=status.HTTP_404_NOT_FOUND)
+                
+        except Document.DoesNotExist:
+            return Response({'error': 'Target document not found'}, status=status.HTTP_404_NOT_FOUND)
+
     @action(detail=False, methods=['delete'])
     def bulk_delete(self, request):
         """Delete multiple documents"""
@@ -388,7 +601,7 @@ class DocumentViewSet(viewsets.ModelViewSet):
 class ImageViewSet(viewsets.ModelViewSet):
     """CRUD operations for images"""
     permission_classes = [IsAuthenticated, IsApprovedUser, IsOwnerOrSharedUser]
-    parser_classes = [MultiPartParser, FormParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
     
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -413,6 +626,78 @@ class ImageViewSet(viewsets.ModelViewSet):
             
         return queryset
     
+    @action(detail=False, methods=['post'])
+    def reorder(self, request):
+        """Reorder images within a document"""
+        image_orders = request.data.get('images', [])
+        document_id = request.data.get('document_id')
+        
+        if not image_orders or not document_id:
+            return Response({'error': 'Images data and document_id required'}, 
+                          status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check document permissions
+        try:
+            document = Document.objects.get(id=document_id)
+            user = request.user
+            if not (document.project.owner == user or 
+                   document.project.projectpermission_set.filter(
+                       user=user, permission__in=['edit', 'admin']
+                   ).exists()):
+                return Response({'error': 'Permission denied'}, 
+                              status=status.HTTP_403_FORBIDDEN)
+        except Document.DoesNotExist:
+            return Response({'error': 'Document not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Use atomic transaction to avoid unique constraint violations
+        try:
+            with transaction.atomic():
+                # Create a mapping of id to new order
+                order_mapping = {str(img_data.get('id')): img_data.get('order') 
+                               for img_data in image_orders 
+                               if img_data.get('id') is not None and img_data.get('order') is not None}
+                
+                # Get all images for this document and sort them by their new order
+                all_images = list(Image.objects.filter(document=document).order_by('order'))
+                
+                # Create a new sorted list based on the provided order
+                sorted_images = []
+                
+                # First, add images with specified orders in correct sequence
+                for order_data in sorted(image_orders, key=lambda x: x.get('order', 0)):
+                    image_id = str(order_data.get('id'))
+                    if image_id:
+                        for image in all_images:
+                            if str(image.id) == image_id:
+                                sorted_images.append(image)
+                                break
+                
+                # Add any remaining images that weren't in the order list
+                specified_ids = {str(img_data.get('id')) for img_data in image_orders if img_data.get('id')}
+                for image in all_images:
+                    if str(image.id) not in specified_ids:
+                        sorted_images.append(image)
+                
+                # Update orders with a two-step approach to avoid constraint violations
+                # Step 1: Set all images to high temporary orders
+                max_order = len(sorted_images) + 1000
+                for i, image in enumerate(sorted_images):
+                    temp_order = max_order + i
+                    if image.order != temp_order:
+                        image.order = temp_order
+                        image.save(update_fields=['order'])
+                
+                # Step 2: Set correct orders sequentially
+                for i, image in enumerate(sorted_images):
+                    image.order = i
+                    image.save(update_fields=['order'])
+        
+        except Exception as e:
+            return Response({'error': f'Failed to reorder images: {str(e)}'}, 
+                          status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        return Response({'message': 'Image order updated successfully'})
+
     @action(detail=False, methods=['delete'])
     def bulk_delete(self, request):
         """Delete multiple images"""

@@ -168,6 +168,9 @@ class Project(models.Model):
     description = models.TextField(blank=True)
     owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='owned_projects')
     
+    # Project ordering
+    order = models.PositiveIntegerField(default=0)
+    
     # Sharing settings
     is_public = models.BooleanField(default=False)
     shared_with = models.ManyToManyField(
@@ -179,7 +182,7 @@ class Project(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
-        ordering = ['-updated_at']
+        ordering = ['order', '-updated_at']
     
     def __str__(self):
         return f"{self.name} (by {self.owner.username})"
@@ -241,7 +244,7 @@ class Document(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
-        ordering = ['-updated_at']
+        ordering = ['reading_order', '-updated_at']
     
     def __str__(self):
         return f"{self.name} (in {self.project.name})"
