@@ -1239,6 +1239,40 @@ class OCRApp {
         document.getElementById('loginForm').addEventListener('submit', (e) => this.login(e));
         document.getElementById('registerForm').addEventListener('submit', (e) => this.register(e));
         
+        // Create Project Form - Enter key support
+        const createProjectForm = document.getElementById('createProjectForm');
+        if (createProjectForm) {
+            createProjectForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                this.createProject();
+            });
+            
+            // Allow Enter in text inputs but not textareas
+            createProjectForm.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
+                    e.preventDefault();
+                    this.createProject();
+                }
+            });
+        }
+        
+        // Create Document Form - Enter key support  
+        const createDocumentForm = document.getElementById('createDocumentForm');
+        if (createDocumentForm) {
+            createDocumentForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                this.createDocument();
+            });
+            
+            // Allow Enter in text inputs but not textareas
+            createDocumentForm.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') {
+                    e.preventDefault();
+                    this.createDocument();
+                }
+            });
+        }
+        
         // Navigation
         document.addEventListener('keydown', (e) => this.handleKeyboard(e));
         
@@ -11518,16 +11552,8 @@ function showCreateProjectModal() {
     app.showCreateProjectModal();
 }
 
-function createProject() {
-    app.createProject();
-}
-
 function showCreateDocumentModal(projectId) {
     app.showCreateDocumentModal(projectId);
-}
-
-function createDocument() {
-    app.createDocument();
 }
 
 function showUploadImageModal(documentId) {
