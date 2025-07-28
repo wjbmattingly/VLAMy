@@ -8889,7 +8889,9 @@ class OCRApp {
             }
 
             const credentials = this.getStoredCredentials();
-            if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+            const activeProvider = this.getActiveProvider();
+            if (!activeProvider) {
+                this.showAlert('Please configure your API credentials first', 'warning');
                 this.showCredentialsModal();
                 return;
             }
@@ -10243,7 +10245,8 @@ class OCRApp {
          
          // Check credentials first
          const credentials = this.getStoredCredentials();
-         if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+         const activeProvider = this.getActiveProvider();
+         if (!activeProvider) {
              this.showAlert('Please configure your API credentials first', 'warning');
              this.showCredentialsModal();
              return;
@@ -10298,7 +10301,8 @@ class OCRApp {
          
          // Check credentials first
          const credentials = this.getStoredCredentials();
-         if (!credentials.openai_api_key && !credentials.custom_endpoint_url) {
+         const activeProvider = this.getActiveProvider();
+         if (!activeProvider) {
              this.showAlert('Please configure your API credentials first', 'warning');
              this.showCredentialsModal();
              return;
