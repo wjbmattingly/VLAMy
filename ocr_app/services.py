@@ -654,9 +654,11 @@ class ExportService:
             annotations_data.append({
                 'id': str(annotation.id),
                 'type': annotation.annotation_type,
+                'classification': annotation.classification,
                 'coordinates': annotation.coordinates,
                 'label': annotation.label,
                 'reading_order': annotation.reading_order,
+                'metadata': annotation.metadata,
                 'transcription': {
                     'text': annotation_transcription.text_content if annotation_transcription else '',
                     'confidence': annotation_transcription.confidence_score if annotation_transcription else None,
@@ -1262,8 +1264,18 @@ class ExportService:
             # Determine region type based on classification
             region_type = PAGEXML_MAPPINGS.get(annotation.classification, 'TextRegion')
             
+            # Escape XML special characters in metadata
+            annotation_label = self._escape_xml(annotation.label or '')
+            annotation_classification = self._escape_xml(annotation.classification or '')
+            
             pagexml_content += f'''
-    <{region_type} id="region_{region_id:04d}">'''
+    <{region_type} id="region_{region_id:04d}" custom="annotation_type:{annotation.annotation_type};classification:{annotation_classification};label:{annotation_label};reading_order:{annotation.reading_order}">'''
+            
+            # Add metadata as custom attributes if present
+            if annotation.metadata:
+                metadata_str = ";".join([f"{k}:{self._escape_xml(str(v))}" for k, v in annotation.metadata.items()])
+                pagexml_content += f'''
+      <UserAttribute name="metadata" value="{metadata_str}"/>'''
             
             # Add coordinates
             if annotation.annotation_type == 'bbox':
@@ -1371,6 +1383,10 @@ class ExportService:
     
     def _create_project_metadata(self, project):
         """Create metadata for a project in the export"""
+        # Get the primary document name (first document or most representative)
+        documents = project.documents.all()
+        primary_document_name = documents.first().name if documents.exists() else project.name
+        
         return {
             'project_id': str(project.id),
             'name': project.name,
@@ -1380,6 +1396,7 @@ class ExportService:
             'updated_at': project.updated_at.isoformat(),
             'document_count': project.documents.count(),
             'total_images': sum([doc.images.count() for doc in project.documents.all()]),
+            'original_document_name': primary_document_name,
             'export_format': 'vlamy',
             'exported_at': datetime.now().isoformat()
         }
@@ -1445,3 +1462,375 @@ class ExportService:
             'updated_at': project.updated_at.isoformat(),
             'documents': documents_data
         } 
+
+class ImportService:
+    """Service for handling data import functionality"""
+    
+    def __init__(self):
+        self.import_dir = os.path.join(settings.MEDIA_ROOT, 'imports')
+        os.makedirs(self.import_dir, exist_ok=True)
+    
+    def import_vlamy_zip(self, zip_file, user):
+        """Import VLAMy format ZIP file"""
+        import tempfile
+        import zipfile
+        from django.core.files.base import ContentFile
+        
+        # Create temporary directory for extraction
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Extract ZIP file
+            with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+                zip_ref.extractall(temp_dir)
+            
+            # Find project directories (any directory with metadata.json)
+            imported_projects = []
+            for item in os.listdir(temp_dir):
+                project_path = os.path.join(temp_dir, item)
+                if os.path.isdir(project_path):
+                    metadata_path = os.path.join(project_path, 'metadata.json')
+                    if os.path.exists(metadata_path):
+                        try:
+                            project = self._import_project_from_directory(project_path, user)
+                            imported_projects.append(project)
+                        except Exception as e:
+                            print(f"Failed to import project from {item}: {e}")
+                            continue
+            
+            return imported_projects
+    
+    def import_vlamy_directory(self, directory_path, user):
+        """Import VLAMy format from a directory"""
+        if not os.path.exists(directory_path):
+            raise ValueError("Directory does not exist")
+        
+        metadata_path = os.path.join(directory_path, 'metadata.json')
+        if not os.path.exists(metadata_path):
+            raise ValueError("No metadata.json found in directory")
+        
+        return self._import_project_from_directory(directory_path, user)
+    
+    def import_json_export(self, json_file, user):
+        """Import JSON export format"""
+        import json
+        
+        # Load JSON data
+        if hasattr(json_file, 'read'):
+            data = json.load(json_file)
+        else:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        
+        imported_projects = []
+        
+        # Handle both single project and bulk export formats
+        if 'projects' in data:
+            # Bulk export format
+            for project_data in data['projects']:
+                project = self._import_project_from_json(project_data, user)
+                imported_projects.append(project)
+        else:
+            # Single project export or direct project data
+            project = self._import_project_from_json(data, user)
+            imported_projects.append(project)
+        
+        return imported_projects
+    
+    def _import_project_from_directory(self, project_path, user):
+        """Import a single project from VLAMy directory structure"""
+        from .models import Project, Document, Image, Annotation, Transcription
+        from django.core.files.base import ContentFile
+        import xml.etree.ElementTree as ET
+        
+        # Load metadata
+        metadata_path = os.path.join(project_path, 'metadata.json')
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+        
+        # Create project (with unique name if conflict)
+        project_name = self._get_unique_project_name(metadata['name'], user)
+        project = Project.objects.create(
+            name=project_name,
+            description=metadata.get('description', ''),
+            owner=user
+        )
+        
+        # Create a single document for all images in this project
+        # Use a more descriptive name based on the original project
+        document_name = metadata.get('original_document_name', project.name)
+        document = Document.objects.create(
+            name=document_name,
+            description=f"Imported from VLAMy export: {metadata.get('description', '')}".strip(),
+            project=project,
+            reading_order=1
+        )
+        
+        # Get page directory
+        page_dir = os.path.join(project_path, 'page')
+        
+        # Process images
+        image_order = 1
+        for filename in os.listdir(project_path):
+            file_path = os.path.join(project_path, filename)
+            
+            # Skip directories and metadata file
+            if os.path.isdir(file_path) or filename == 'metadata.json':
+                continue
+            
+            # Check if it's an image file
+            if filename.lower().endswith(('.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp')):
+                try:
+                    image = self._import_image_from_file(
+                        file_path, filename, document, image_order
+                    )
+                    
+                    # Look for corresponding PageXML file
+                    base_name = os.path.splitext(filename)[0]
+                    pagexml_path = os.path.join(page_dir, f"{base_name}.xml")
+                    
+                    if os.path.exists(pagexml_path):
+                        self._import_annotations_from_pagexml(pagexml_path, image)
+                    
+                    image_order += 1
+                except Exception as e:
+                    print(f"Failed to import image {filename}: {e}")
+                    # Continue processing other images even if one fails
+                    continue
+        
+        return project
+    
+    def _import_project_from_json(self, project_data, user):
+        """Import a project from JSON data"""
+        from .models import Project, Document, Image, Annotation, Transcription
+        
+        # Create project (with unique name if conflict)
+        project_name = self._get_unique_project_name(project_data['name'], user)
+        project = Project.objects.create(
+            name=project_name,
+            description=project_data.get('description', ''),
+            owner=user
+        )
+        
+        # Import documents
+        for doc_data in project_data.get('documents', []):
+            document = Document.objects.create(
+                name=doc_data['name'],
+                description=doc_data.get('description', ''),
+                project=project,
+                reading_order=doc_data.get('reading_order', 1)
+            )
+            
+            # Import images
+            for img_data in doc_data.get('images', []):
+                # Note: In JSON export, actual image files are not included
+                # We create placeholder images or skip if no file is available
+                image = Image.objects.create(
+                    name=img_data['name'],
+                    original_filename=img_data.get('original_filename'),
+                    width=img_data.get('width', 0),
+                    height=img_data.get('height', 0),
+                    file_size=0,  # Placeholder for JSON imports without actual files
+                    document=document,
+                    order=img_data.get('order', 1)
+                )
+                
+                # Import full image transcription if available
+                if img_data.get('transcription'):
+                    trans_data = img_data['transcription']
+                    if trans_data.get('text'):
+                        Transcription.objects.create(
+                            image=image,
+                            text_content=trans_data['text'],
+                            confidence_score=trans_data.get('confidence'),
+                            is_current=True,
+                            transcription_type='full_image',
+                            api_endpoint='imported_from_json',
+                            created_by=user  # Set the creator to the importing user
+                        )
+                
+                # Import annotations
+                for ann_data in img_data.get('annotations', []):
+                    annotation = Annotation.objects.create(
+                        image=image,
+                        annotation_type=ann_data['type'],
+                        classification=ann_data.get('classification', 'custom'),
+                        coordinates=ann_data['coordinates'],
+                        label=ann_data.get('label', ''),
+                        reading_order=ann_data.get('reading_order', 0),
+                        metadata=ann_data.get('metadata', {}),
+                        created_by=user  # Set the creator to the importing user
+                    )
+                    
+                    # Import annotation transcription
+                    if ann_data.get('transcription'):
+                        trans_data = ann_data['transcription']
+                        if trans_data.get('text'):
+                            Transcription.objects.create(
+                                image=image,  # Required field
+                                annotation=annotation,  # Link to specific annotation
+                                text_content=trans_data['text'],
+                                confidence_score=trans_data.get('confidence'),
+                                is_current=True,
+                                transcription_type='annotation',
+                                api_endpoint='imported_from_json',
+                                created_by=user  # Set the creator to the importing user
+                            )
+        
+        return project
+    
+    def _import_image_from_file(self, file_path, filename, document, order):
+        """Import an image file into the database"""
+        from .models import Image
+        from django.core.files.base import ContentFile
+        from PIL import Image as PILImage
+        
+        # Get image dimensions and file size
+        with PILImage.open(file_path) as pil_img:
+            width, height = pil_img.size
+        
+        # Read file content
+        with open(file_path, 'rb') as f:
+            file_content = f.read()
+        
+        file_size = len(file_content)
+        
+        # Create image record
+        image = Image.objects.create(
+            name=os.path.splitext(filename)[0],
+            original_filename=filename,
+            width=width,
+            height=height,
+            file_size=file_size,
+            document=document,
+            order=order
+        )
+        
+        # Save file to storage
+        image.image_file.save(filename, ContentFile(file_content))
+        image.save()
+        
+        return image
+    
+    def _import_annotations_from_pagexml(self, pagexml_path, image):
+        """Import annotations from PageXML file"""
+        from .models import Annotation, Transcription
+        import xml.etree.ElementTree as ET
+        
+        try:
+            tree = ET.parse(pagexml_path)
+            root = tree.getroot()
+            
+            # Define namespace
+            ns = {'page': 'http://schema.primaresearch.org/PAGE/gts/pagecontent/2013-07-15'}
+            
+            reading_order = 1
+            
+            # Process all region types (TextRegion, GraphicRegion, CustomRegion, etc.)
+            region_types = ['TextRegion', 'GraphicRegion', 'ImageRegion', 'LineDrawingRegion', 'ChartRegion', 'TableRegion', 'CustomRegion']
+            for region_type in region_types:
+                for region in root.findall(f'.//page:{region_type}', ns):
+                    coords_elem = region.find('page:Coords', ns)
+                    if coords_elem is not None:
+                        points_str = coords_elem.get('points', '')
+                        if points_str:
+                            # Parse coordinates
+                            points = []
+                            for point_str in points_str.split():
+                                if ',' in point_str:
+                                    x, y = point_str.split(',')
+                                    points.append({'x': float(x), 'y': float(y)})
+                            
+                            if len(points) >= 3:
+                                # Parse annotation metadata from custom attributes
+                                annotation_type = 'polygon'  # default
+                                classification = 'text_region'  # default
+                                label = ''
+                                reading_order_val = reading_order
+                                metadata = {}
+                                
+                                # Parse custom attribute
+                                custom_attr = region.get('custom', '')
+                                if custom_attr:
+                                    for item in custom_attr.split(';'):
+                                        if ':' in item:
+                                            key, value = item.split(':', 1)
+                                            if key == 'annotation_type':
+                                                annotation_type = value
+                                            elif key == 'classification':
+                                                classification = value
+                                            elif key == 'label':
+                                                label = value
+                                            elif key == 'reading_order':
+                                                try:
+                                                    reading_order_val = int(value)
+                                                except ValueError:
+                                                    pass
+                                
+                                # Parse metadata from UserAttribute
+                                metadata_elem = region.find('page:UserAttribute[@name="metadata"]', ns)
+                                if metadata_elem is not None:
+                                    metadata_str = metadata_elem.get('value', '')
+                                    for item in metadata_str.split(';'):
+                                        if ':' in item:
+                                            key, value = item.split(':', 1)
+                                            metadata[key] = value
+                                
+                                # Determine coordinates format based on annotation type
+                                coordinates = {'points': points}
+                                if annotation_type == 'bbox' and len(points) >= 4:
+                                    # Convert points to bbox format
+                                    xs = [p['x'] for p in points]
+                                    ys = [p['y'] for p in points]
+                                    coordinates = {
+                                        'x': min(xs),
+                                        'y': min(ys), 
+                                        'width': max(xs) - min(xs),
+                                        'height': max(ys) - min(ys)
+                                    }
+                                
+                                # Create annotation
+                                annotation = Annotation.objects.create(
+                                    image=image,
+                                    annotation_type=annotation_type,
+                                    classification=classification,
+                                    coordinates=coordinates,
+                                    label=label,
+                                    reading_order=reading_order_val,
+                                    metadata=metadata,
+                                    created_by=image.document.project.owner  # Set the creator
+                                )
+                                
+                                # Extract text content
+                                text_content = ''
+                                for textline in region.findall('.//page:TextLine', ns):
+                                    unicode_elem = textline.find('.//page:Unicode', ns)
+                                    if unicode_elem is not None and unicode_elem.text:
+                                        text_content += unicode_elem.text + '\n'
+                                
+                                if text_content.strip():
+                                    Transcription.objects.create(
+                                        image=image,  # Required field
+                                        annotation=annotation,  # Link to specific annotation
+                                        text_content=text_content.strip(),
+                                        is_current=True,
+                                        transcription_type='annotation',
+                                        api_endpoint='imported_from_pagexml',
+                                        created_by=image.document.project.owner  # Set the creator
+                                    )
+                                
+                                reading_order += 1
+            
+        except Exception as e:
+            print(f"Failed to parse PageXML {pagexml_path}: {e}")
+    
+    def _get_unique_project_name(self, base_name, user):
+        """Get a unique project name for the user"""
+        from .models import Project
+        
+        original_name = base_name
+        counter = 1
+        
+        while Project.objects.filter(name=base_name, owner=user).exists():
+            base_name = f"{original_name} ({counter})"
+            counter += 1
+        
+        return base_name 

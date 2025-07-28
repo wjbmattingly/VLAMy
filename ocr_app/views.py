@@ -3,24 +3,30 @@ import json
 import time
 import requests
 import zipfile
+import uuid
 from io import BytesIO
+from datetime import datetime
 from PIL import Image as PILImage
 
-from django.shortcuts import render
+from django.shortcuts import render, get_object_or_404
+from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
-from django.contrib.auth import authenticate
-from django.db.models import Q, Count
-from django.http import HttpResponse, Http404
-from django.utils import timezone
+from django.http import JsonResponse, HttpResponse, Http404
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
+from django.views import View
 from django.conf import settings
+from django.utils import timezone
+from django.db.models import Q, Count
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
+from django.core.paginator import Paginator
 
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, FileUploadParser, JSONParser
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.authtoken.models import Token
 from django.views.decorators.csrf import csrf_exempt
@@ -39,7 +45,7 @@ from .serializers import (
     AnnotationSerializer, TranscriptionSerializer, ExportJobSerializer,
     APICredentialsSerializer, TranscriptionRequestSerializer
 )
-from .services import OCRService, ExportService, RoboflowDetectionService
+from .services import OCRService, ExportService, RoboflowDetectionService, ImportService
 from .permissions import IsOwnerOrSharedUser, IsApprovedUser
 
 
@@ -1484,3 +1490,105 @@ class IIIFManifestView(APIView):
             return resource['@id']
             
         return None
+
+
+class ImportProjectView(APIView):
+    """Import project data from various formats"""
+    permission_classes = [IsAuthenticated, IsApprovedUser]
+    parser_classes = [MultiPartParser, FileUploadParser]
+    
+    def post(self, request):
+        import_format = request.data.get('format', 'vlamy')
+        
+        if 'file' not in request.FILES:
+            return Response(
+                {'error': 'No file provided'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        uploaded_file = request.FILES['file']
+        
+        try:
+            import_service = ImportService()
+            imported_projects = []
+            
+            if import_format == 'vlamy' and uploaded_file.name.lower().endswith('.zip'):
+                # Import VLAMy ZIP format
+                imported_projects = import_service.import_vlamy_zip(uploaded_file, request.user)
+                
+            elif import_format == 'json' and uploaded_file.name.lower().endswith('.json'):
+                # Import JSON format
+                imported_projects = import_service.import_json_export(uploaded_file, request.user)
+                
+            else:
+                return Response(
+                    {'error': 'Unsupported file format. Use .zip for VLAMy format or .json for JSON format'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if not imported_projects:
+                return Response(
+                    {'error': 'No projects were imported. Please check the file format.'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Return summary of imported projects
+            return Response({
+                'message': f'Successfully imported {len(imported_projects)} project(s)',
+                'imported_projects': [
+                    {
+                        'id': str(project.id),
+                        'name': project.name,
+                        'document_count': project.documents.count(),
+                        'total_images': sum([doc.images.count() for doc in project.documents.all()])
+                    }
+                    for project in imported_projects
+                ]
+            })
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Import failed: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class ImportDirectoryView(APIView):
+    """Import project data from a directory (for development/admin use)"""
+    permission_classes = [IsAuthenticated, IsApprovedUser]
+    
+    def post(self, request):
+        directory_path = request.data.get('directory_path')
+        
+        if not directory_path:
+            return Response(
+                {'error': 'Directory path is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Security check - only allow if user is staff
+        if not request.user.is_staff:
+            return Response(
+                {'error': 'Directory import is only available to staff users'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        try:
+            import_service = ImportService()
+            project = import_service.import_vlamy_directory(directory_path, request.user)
+            
+            return Response({
+                'message': 'Successfully imported project from directory',
+                'imported_project': {
+                    'id': str(project.id),
+                    'name': project.name,
+                    'document_count': project.documents.count(),
+                    'total_images': sum([doc.images.count() for doc in project.documents.all()])
+                }
+            })
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Import failed: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

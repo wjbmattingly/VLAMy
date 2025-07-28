@@ -37,6 +37,11 @@
                             <i class="fas fa-download me-1"></i>Exports
                         </a>
                     </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" onclick="showImports()">
+                            <i class="fas fa-upload me-1"></i>Import
+                        </a>
+                    </li>
                 </ul>
                 
                 <ul class="navbar-nav">
@@ -1242,6 +1247,76 @@
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="exportCloseButton">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Import Projects Modal -->
+    <div class="modal fade" id="importProjectsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-upload me-2 text-primary"></i>Import Projects
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-info">
+                        <i class="fas fa-info-circle me-2"></i>
+                        <strong>Import your exported VLAMy projects:</strong> Upload a ZIP file exported from VLAMy or a JSON export file to restore your projects with all annotations and transcriptions.
+                    </div>
+                    
+                    <form id="importProjectsForm" enctype="multipart/form-data">
+                        <div class="mb-3">
+                            <label class="form-label">Import Format</label>
+                            <select class="form-select" id="importFormat">
+                                <option value="vlamy" selected>VLAMy Format (ZIP with images + PageXML)</option>
+                                <option value="json">JSON Format (metadata only)</option>
+                            </select>
+                            <div class="form-text">VLAMy format includes images and PageXML files. JSON format contains only metadata and transcriptions.</div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="importFile" class="form-label">Select File to Import</label>
+                            <input type="file" class="form-control" id="importFile" accept=".zip,.json" required>
+                            <div class="form-text">Select a .zip file for VLAMy format or a .json file for JSON format.</div>
+                        </div>
+                        
+                        <div class="alert alert-warning">
+                            <i class="fas fa-exclamation-triangle me-2"></i>
+                            <strong>Note:</strong> Imported projects will be added to your account. If a project with the same name exists, it will be renamed automatically.
+                        </div>
+                        
+                        <div id="importProgress" style="display: none;">
+                            <div class="progress mb-3">
+                                <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 100%"></div>
+                            </div>
+                            <div id="importStatus">Processing import...</div>
+                        </div>
+                        
+                        <div id="importResult" style="display: none;">
+                            <div class="alert alert-success">
+                                <i class="fas fa-check-circle me-2"></i>
+                                <div id="importResultMessage">Import completed successfully!</div>
+                            </div>
+                            <div id="importSummary"></div>
+                        </div>
+                        
+                        <div id="importError" style="display: none;">
+                            <div class="alert alert-danger">
+                                <i class="fas fa-exclamation-triangle me-2"></i>
+                                <span id="importErrorMessage">Import failed</span>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="startImport()" id="importButton">
+                        <i class="fas fa-upload me-2"></i>Start Import
+                    </button>
                 </div>
             </div>
         </div>

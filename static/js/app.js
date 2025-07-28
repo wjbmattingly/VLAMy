@@ -6022,11 +6022,9 @@ async ensureMainZonePrompt() {
     // Export functionality
     async showExportsModal() {
         const modal = new bootstrap.Modal(document.getElementById('exportProjectsModal'));
-        
+        modal.show();
         // Load projects for export selection
         await this.loadProjectsForExport();
-        
-        modal.show();
     }
 
     async loadProjectsForExport() {
@@ -7292,6 +7290,108 @@ async ensureMainZonePrompt() {
         }
     }
 
+    // Import functionality
+    async showImportsModal() {
+        const modal = new bootstrap.Modal(document.getElementById('importProjectsModal'));
+        modal.show();
+        
+        // Reset form
+        document.getElementById('importProjectsForm').reset();
+        document.getElementById('importProgress').style.display = 'none';
+        document.getElementById('importResult').style.display = 'none';
+        document.getElementById('importError').style.display = 'none';
+    }
+
+    async startImport() {
+        const fileInput = document.getElementById('importFile');
+        const importFormat = document.getElementById('importFormat').value;
+        
+        if (!fileInput.files || fileInput.files.length === 0) {
+            this.showAlert('Please select a file to import', 'warning');
+            return;
+        }
+        
+        const file = fileInput.files[0];
+        
+        // Validate file format
+        if (importFormat === 'vlamy' && !file.name.toLowerCase().endsWith('.zip')) {
+            this.showAlert('Please select a ZIP file for VLAMy format', 'warning');
+            return;
+        }
+        
+        if (importFormat === 'json' && !file.name.toLowerCase().endsWith('.json')) {
+            this.showAlert('Please select a JSON file for JSON format', 'warning');
+            return;
+        }
+        
+        // Show progress
+        document.getElementById('importProgress').style.display = 'block';
+        document.getElementById('importResult').style.display = 'none';
+        document.getElementById('importError').style.display = 'none';
+        document.getElementById('importButton').disabled = true;
+        document.getElementById('importStatus').textContent = 'Uploading and processing file...';
+        
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('format', importFormat);
+            
+            const response = await fetch(`${this.apiBaseUrl}/import/project/`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Token ${this.authToken}`
+                },
+                body: formData
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                
+                // Show success
+                document.getElementById('importProgress').style.display = 'none';
+                document.getElementById('importResult').style.display = 'block';
+                document.getElementById('importResultMessage').textContent = result.message;
+                
+                // Show import summary
+                let summaryHtml = '<div class="mt-3"><h6>Imported Projects:</h6><ul class="list-group list-group-flush">';
+                for (const project of result.imported_projects) {
+                    summaryHtml += `
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            <div>
+                                <strong>${this.escapeHtml(project.name)}</strong>
+                                <br><small class="text-muted">${project.document_count} document(s), ${project.total_images} image(s)</small>
+                            </div>
+                            <span class="badge bg-success rounded-pill">Imported</span>
+                        </li>
+                    `;
+                }
+                summaryHtml += '</ul></div>';
+                document.getElementById('importSummary').innerHTML = summaryHtml;
+                
+                // Refresh projects list
+                await this.loadProjects();
+                
+                // If we're on the projects view, make sure it's visible
+                if (document.getElementById('projectsList')) {
+                    this.showAppInterface();
+                }
+                
+            } else {
+                const error = await response.json();
+                throw new Error(error.error || 'Import failed');
+            }
+            
+        } catch (error) {
+            console.error('Import error:', error);
+            
+            document.getElementById('importProgress').style.display = 'none';
+            document.getElementById('importError').style.display = 'block';
+            document.getElementById('importErrorMessage').textContent = error.message;
+        } finally {
+            document.getElementById('importButton').disabled = false;
+        }
+    }
+
     // Background Detection Processing
     async executeProjectDetection(projectId, mode, credentials, selectedZones, selectedLines, useFiltering = false) {
         this.operationCancelled = false;
@@ -7596,6 +7696,14 @@ function showProjects() {
 
 function showExports() {
     app.showExportsModal();
+}
+
+function showImports() {
+    app.showImportsModal();
+}
+
+function startImport() {
+    app.startImport();
 }
 
 
