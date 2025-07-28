@@ -5845,21 +5845,31 @@ class OCRApp {
             try {
                 const annotation = this.annotations.find(a => a.id === annotationId);
                 if (annotation && annotation.transcription) {
-                    // Remove transcription from backend
-                    const response = await fetch(`${this.apiBaseUrl}/transcriptions/${annotation.transcription.id}/`, {
-                        method: 'DELETE',
-                        headers: {
-                            'Authorization': `Token ${this.authToken}`
-                        }
-                    });
-
-                    if (response.ok) {
+                    if (this.isBrowserCacheMode) {
+                        // Delete from browser cache
+                        await this.localStorage.delete('transcriptions', annotation.transcription.id);
+                        
                         // Remove from local annotation
                         annotation.transcription = null;
                         this.updateCombinedTranscription();
                         this.showAlert('Transcription removed successfully', 'success');
                     } else {
-                        this.showAlert('Failed to remove transcription', 'danger');
+                        // Remove transcription from backend
+                        const response = await fetch(`${this.apiBaseUrl}/transcriptions/${annotation.transcription.id}/`, {
+                            method: 'DELETE',
+                            headers: {
+                                'Authorization': `Token ${this.authToken}`
+                            }
+                        });
+
+                        if (response.ok) {
+                            // Remove from local annotation
+                            annotation.transcription = null;
+                            this.updateCombinedTranscription();
+                            this.showAlert('Transcription removed successfully', 'success');
+                        } else {
+                            this.showAlert('Failed to remove transcription', 'danger');
+                        }
                     }
                 }
             } catch (error) {
@@ -8899,35 +8909,55 @@ class OCRApp {
     }
 
     async deleteSelectedAnnotations() {
+        console.log('deleteSelectedAnnotations called, isBrowserCacheMode:', this.isBrowserCacheMode);
+        
         if (this.canvas && this.canvas.getActiveObjects().length > 0) {
             const objectsToDelete = this.canvas.getActiveObjects();
+            console.log('Objects to delete:', objectsToDelete.length, objectsToDelete.map(o => ({id: o.annotationId, temp: o.annotationId?.startsWith('temp_')})));
             
             for (const obj of objectsToDelete) {
                 if (obj.annotationId) {
                     // Delete from database if it's not a temp annotation
                     if (!obj.annotationId.startsWith('temp_')) {
                         try {
-                            await fetch(`${this.apiBaseUrl}/annotations/${obj.annotationId}/`, {
-                                method: 'DELETE',
-                                headers: {
-                                    'Authorization': `Token ${this.authToken}`
-                                }
-                            });
+                            if (this.isBrowserCacheMode) {
+                                console.log('Deleting annotation from browser cache:', obj.annotationId);
+                                // Delete from browser cache
+                                await this.localStorage.delete('annotations', obj.annotationId);
+                                console.log('Successfully deleted annotation from cache:', obj.annotationId);
+                            } else {
+                                console.log('Deleting annotation from server:', obj.annotationId);
+                                // Use server API
+                                await fetch(`${this.apiBaseUrl}/annotations/${obj.annotationId}/`, {
+                                    method: 'DELETE',
+                                    headers: {
+                                        'Authorization': `Token ${this.authToken}`
+                                    }
+                                });
+                                console.log('Successfully deleted annotation from server:', obj.annotationId);
+                            }
                         } catch (error) {
-                            console.error('Error deleting annotation from database:', error);
+                            console.error('Error deleting annotation:', obj.annotationId, error);
                         }
+                    } else {
+                        console.log('Skipping temp annotation:', obj.annotationId);
                     }
                     
                     // Remove from local annotations array
                     this.annotations = this.annotations.filter(a => a.id !== obj.annotationId);
+                    console.log('Removed annotation from local array:', obj.annotationId);
                 }
                 
                 // Remove from canvas
                 this.canvas.remove(obj);
+                console.log('Removed object from canvas');
             }
             
             this.canvas.discardActiveObject();
             this.updateAnnotationsList();
+            console.log('deleteSelectedAnnotations completed');
+        } else {
+            console.log('No objects selected for deletion');
         }
     }
 
@@ -9147,61 +9177,153 @@ class OCRApp {
         try {
             let totalDeleted = 0;
 
-            // Delete in order: images first, then documents, then projects
-            if (this.pendingDeleteItems.image.length > 0) {
-                const imageIds = this.pendingDeleteItems.image.map(item => item.id);
-                const response = await fetch(`${this.apiBaseUrl}/images/bulk_delete/`, {
-                    method: 'DELETE',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Token ${this.authToken}`
-                    },
-                    body: JSON.stringify({ image_ids: imageIds })
-                });
+            if (this.isBrowserCacheMode) {
+                // Handle browser cache mode with individual deletions
                 
-                if (response.ok) {
-                    const result = await response.json();
-                    totalDeleted += result.deleted_count;
-                } else {
-                    throw new Error('Failed to delete images');
+                // Delete in order: images first, then documents, then projects
+                if (this.pendingDeleteItems.image.length > 0) {
+                    for (const imageItem of this.pendingDeleteItems.image) {
+                        // Delete annotations for this image
+                        const annotations = await this.localStorage.getAll('annotations', 'image_id', imageItem.id);
+                        for (const annotation of annotations) {
+                            await this.localStorage.delete('annotations', annotation.id);
+                        }
+                        
+                        // Delete transcriptions for this image
+                        const transcriptions = await this.localStorage.getAll('transcriptions', 'image', imageItem.id);
+                        for (const transcription of transcriptions) {
+                            await this.localStorage.delete('transcriptions', transcription.id);
+                        }
+                        
+                        // Delete image
+                        await this.localStorage.delete('images', imageItem.id);
+                        totalDeleted++;
+                    }
                 }
-            }
 
-            if (this.pendingDeleteItems.document.length > 0) {
-                const documentIds = this.pendingDeleteItems.document.map(item => item.id);
-                const response = await fetch(`${this.apiBaseUrl}/documents/bulk_delete/`, {
-                    method: 'DELETE',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Token ${this.authToken}`
-                    },
-                    body: JSON.stringify({ document_ids: documentIds })
-                });
-                
-                if (response.ok) {
-                    const result = await response.json();
-                    totalDeleted += result.deleted_count;
-                } else {
-                    throw new Error('Failed to delete documents');
+                if (this.pendingDeleteItems.document.length > 0) {
+                    for (const docItem of this.pendingDeleteItems.document) {
+                        // Get all images for this document
+                        const images = await this.localStorage.getAll('images', 'document_id', docItem.id);
+                        
+                        for (const image of images) {
+                            // Delete annotations for this image
+                            const annotations = await this.localStorage.getAll('annotations', 'image_id', image.id);
+                            for (const annotation of annotations) {
+                                await this.localStorage.delete('annotations', annotation.id);
+                            }
+                            
+                            // Delete transcriptions for this image
+                            const transcriptions = await this.localStorage.getAll('transcriptions', 'image', image.id);
+                            for (const transcription of transcriptions) {
+                                await this.localStorage.delete('transcriptions', transcription.id);
+                            }
+                            
+                            // Delete image
+                            await this.localStorage.delete('images', image.id);
+                        }
+                        
+                        // Delete document
+                        await this.localStorage.delete('documents', docItem.id);
+                        totalDeleted++;
+                    }
                 }
-            }
 
-            if (this.pendingDeleteItems.project.length > 0) {
-                const projectIds = this.pendingDeleteItems.project.map(item => item.id);
-                const response = await fetch(`${this.apiBaseUrl}/projects/bulk_delete/`, {
-                    method: 'DELETE',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Token ${this.authToken}`
-                    },
-                    body: JSON.stringify({ project_ids: projectIds })
-                });
+                if (this.pendingDeleteItems.project.length > 0) {
+                    for (const projectItem of this.pendingDeleteItems.project) {
+                        // Get all documents for this project
+                        const documents = await this.localStorage.getAll('documents', 'project_id', projectItem.id);
+                        
+                        // Delete all related data
+                        for (const document of documents) {
+                            // Get all images for this document
+                            const images = await this.localStorage.getAll('images', 'document_id', document.id);
+                            
+                            for (const image of images) {
+                                // Delete annotations for this image
+                                const annotations = await this.localStorage.getAll('annotations', 'image_id', image.id);
+                                for (const annotation of annotations) {
+                                    await this.localStorage.delete('annotations', annotation.id);
+                                }
+                                
+                                // Delete transcriptions for this image
+                                const transcriptions = await this.localStorage.getAll('transcriptions', 'image', image.id);
+                                for (const transcription of transcriptions) {
+                                    await this.localStorage.delete('transcriptions', transcription.id);
+                                }
+                                
+                                // Delete image
+                                await this.localStorage.delete('images', image.id);
+                            }
+                            
+                            // Delete document
+                            await this.localStorage.delete('documents', document.id);
+                        }
+                        
+                        // Delete project
+                        await this.localStorage.delete('projects', projectItem.id);
+                        totalDeleted++;
+                    }
+                }
+            } else {
+                // Use server API for bulk deletions
                 
-                if (response.ok) {
-                    const result = await response.json();
-                    totalDeleted += result.deleted_count;
-                } else {
-                    throw new Error('Failed to delete projects');
+                // Delete in order: images first, then documents, then projects
+                if (this.pendingDeleteItems.image.length > 0) {
+                    const imageIds = this.pendingDeleteItems.image.map(item => item.id);
+                    const response = await fetch(`${this.apiBaseUrl}/images/bulk_delete/`, {
+                        method: 'DELETE',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Token ${this.authToken}`
+                        },
+                        body: JSON.stringify({ image_ids: imageIds })
+                    });
+                    
+                    if (response.ok) {
+                        const result = await response.json();
+                        totalDeleted += result.deleted_count;
+                    } else {
+                        throw new Error('Failed to delete images');
+                    }
+                }
+
+                if (this.pendingDeleteItems.document.length > 0) {
+                    const documentIds = this.pendingDeleteItems.document.map(item => item.id);
+                    const response = await fetch(`${this.apiBaseUrl}/documents/bulk_delete/`, {
+                        method: 'DELETE',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Token ${this.authToken}`
+                        },
+                        body: JSON.stringify({ document_ids: documentIds })
+                    });
+                    
+                    if (response.ok) {
+                        const result = await response.json();
+                        totalDeleted += result.deleted_count;
+                    } else {
+                        throw new Error('Failed to delete documents');
+                    }
+                }
+
+                if (this.pendingDeleteItems.project.length > 0) {
+                    const projectIds = this.pendingDeleteItems.project.map(item => item.id);
+                    const response = await fetch(`${this.apiBaseUrl}/projects/bulk_delete/`, {
+                        method: 'DELETE',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Token ${this.authToken}`
+                        },
+                        body: JSON.stringify({ project_ids: projectIds })
+                    });
+                    
+                    if (response.ok) {
+                        const result = await response.json();
+                        totalDeleted += result.deleted_count;
+                    } else {
+                        throw new Error('Failed to delete projects');
+                    }
                 }
             }
 

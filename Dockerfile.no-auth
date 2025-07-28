@@ -1,0 +1,300 @@
+# Browser-Only Version (No User Authentication)
+# Use Python 3.11 slim image for better compatibility
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PORT=7860
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    libmagic1 \
+    libmagic-dev \
+    file \
+    gcc \
+    g++ \
+    libc6-dev \
+    libffi-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libtiff-dev \
+    libwebp-dev \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set work directory
+WORKDIR /app
+
+# Clone the repository
+RUN git clone https://github.com/wjbmattingly/VLAMy.git .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Create necessary directories
+RUN mkdir -p /app/media/imports /app/staticfiles /app/logs
+
+# Create custom settings for no-auth mode
+RUN echo 'from .settings import *\n\
+\n\
+# Disable authentication requirements but keep auth apps for model dependencies\n\
+REST_FRAMEWORK = {\n\
+    "DEFAULT_AUTHENTICATION_CLASSES": [],\n\
+    "DEFAULT_PERMISSION_CLASSES": [\n\
+        "rest_framework.permissions.AllowAny",\n\
+    ],\n\
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",\n\
+    "PAGE_SIZE": 20,\n\
+}\n\
+\n\
+# Use in-memory database for simplicity\n\
+DATABASES = {\n\
+    "default": {\n\
+        "ENGINE": "django.db.backends.sqlite3",\n\
+        "NAME": ":memory:",\n\
+    }\n\
+}\n\
+\n\
+# Enhanced cache settings for browser-only mode\n\
+CACHES = {\n\
+    "default": {\n\
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",\n\
+        "LOCATION": "vlamy-cache",\n\
+        "TIMEOUT": 86400,  # 24 hours\n\
+        "OPTIONS": {\n\
+            "MAX_ENTRIES": 1000,\n\
+        }\n\
+    }\n\
+}\n\
+\n\
+# Keep auth middleware but disable auth requirements\n\
+MIDDLEWARE = [\n\
+    "corsheaders.middleware.CorsMiddleware",\n\
+    "django.middleware.security.SecurityMiddleware",\n\
+    "django.contrib.sessions.middleware.SessionMiddleware",\n\
+    "django.middleware.common.CommonMiddleware",\n\
+    "django.middleware.csrf.CsrfViewMiddleware",\n\
+    "django.contrib.auth.middleware.AuthenticationMiddleware",\n\
+    "django.contrib.messages.middleware.MessageMiddleware",\n\
+    # Removed XFrameOptionsMiddleware to allow iframe embedding\n\
+]\n\
+\n\
+# Keep all apps installed to avoid model dependency issues\n\
+INSTALLED_APPS = [\n\
+    "django.contrib.admin",\n\
+    "django.contrib.auth",\n\
+    "django.contrib.contenttypes",\n\
+    "django.contrib.sessions",\n\
+    "django.contrib.messages",\n\
+    "django.contrib.staticfiles",\n\
+    "rest_framework",\n\
+    "rest_framework.authtoken",\n\
+    "corsheaders",\n\
+    "ocr_app",\n\
+]\n\
+\n\
+# Allow all CORS origins for browser-only mode\n\
+CORS_ALLOW_ALL_ORIGINS = True\n\
+CORS_ALLOW_CREDENTIALS = False\n\
+\n\
+# Static files configuration for no-auth mode\n\
+import os\n\
+STATIC_URL = "/static/"\n\
+STATIC_ROOT = os.path.join(BASE_DIR, "staticfiles")\n\
+STATICFILES_DIRS = [\n\
+    os.path.join(BASE_DIR, "static"),\n\
+]\n\
+\n\
+# Media files configuration\n\
+MEDIA_URL = "/media/"\n\
+MEDIA_ROOT = os.path.join(BASE_DIR, "media")\n\
+\n\
+# Enable static file serving in development\n\
+DEBUG = True\n\
+\n\
+# Session settings for browser storage\n\
+SESSION_ENGINE = "django.contrib.sessions.backends.cache"\n\
+SESSION_CACHE_ALIAS = "default"\n\
+SESSION_COOKIE_AGE = 86400  # 24 hours\n\
+\n\
+# Disable file logging to avoid permission issues\n\
+LOGGING = {\n\
+    "version": 1,\n\
+    "disable_existing_loggers": False,\n\
+    "handlers": {\n\
+        "console": {\n\
+            "level": "INFO",\n\
+            "class": "logging.StreamHandler",\n\
+        },\n\
+    },\n\
+    "loggers": {\n\
+        "ocr_app": {\n\
+            "handlers": ["console"],\n\
+            "level": "INFO",\n\
+            "propagate": True,\n\
+        },\n\
+    },\n\
+}\n\
+\n\
+# Create anonymous user middleware reference\n\
+MIDDLEWARE.insert(0, "vlamy_ocr.middleware.AnonymousUserMiddleware")\n\
+\n\
+# Settings for HuggingFace Spaces iframe embedding\n\
+X_FRAME_OPTIONS = "ALLOWALL"  # Allow iframe embedding\n\
+SECURE_CROSS_ORIGIN_OPENER_POLICY = None\n\
+SECURE_REFERRER_POLICY = "same-origin"\n\
+\n\
+# Additional security settings for iframe embedding\n\
+SECURE_CONTENT_TYPE_NOSNIFF = False\n\
+SECURE_BROWSER_XSS_FILTER = False\n\
+\n\
+# Allow HuggingFace Spaces in CSP\n\
+CSP_FRAME_ANCESTORS = ["*"]\n\
+CSP_DEFAULT_SRC = ["*"]\n\
+\n\
+# Disable Django security warnings for iframe embedding\n\
+import warnings\n\
+warnings.filterwarnings("ignore", module="django.security")\n\
+\n\
+' > /app/vlamy_ocr/settings_no_auth.py
+
+# Create a custom URL configuration for no-auth mode
+RUN echo 'from django.urls import path, include\n\
+from django.conf import settings\n\
+from django.conf.urls.static import static\n\
+from django.views.generic import TemplateView\n\
+from django.contrib.staticfiles.urls import staticfiles_urlpatterns\n\
+import os\n\
+\n\
+urlpatterns = [\n\
+    # API endpoints (no auth required - permissions handled by settings)\n\
+    path("api/", include("ocr_app.urls")),\n\
+    \n\
+    # Frontend routes (single-page application)\n\
+    path("", TemplateView.as_view(template_name="index.html"), name="home"),\n\
+    path("app/", TemplateView.as_view(template_name="index.html"), name="app"),\n\
+]\n\
+\n\
+# Always serve static and media files (essential for no-auth mode)\n\
+urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)\n\
+urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)\n\
+urlpatterns += staticfiles_urlpatterns()\n\
+\n\
+# Debug info\n\
+print(f"Static URL: {settings.STATIC_URL}")\n\
+print(f"Static Root: {settings.STATIC_ROOT}")\n\
+static_dirs = getattr(settings, "STATICFILES_DIRS", [])\n\
+print(f"Static Dirs: {static_dirs}")\n\
+' > /app/vlamy_ocr/urls_no_auth.py
+
+# Ensure static directories exist and collect static files
+RUN mkdir -p /app/static /app/staticfiles && \
+    DJANGO_SETTINGS_MODULE=vlamy_ocr.settings_no_auth python manage.py collectstatic --noinput --verbosity=2
+
+# Replace the main urls.py with no-auth version at build time
+RUN cp /app/vlamy_ocr/urls_no_auth.py /app/vlamy_ocr/urls.py
+
+# Create anonymous user middleware for no-auth mode
+RUN echo 'import os\n\
+from django.contrib.auth.models import User, AnonymousUser\n\
+from django.core.management import execute_from_command_line\n\
+from django.db import connection\n\
+from django.apps import apps\n\
+\n\
+class AnonymousUserMiddleware:\n\
+    """Middleware that automatically handles migrations and creates an anonymous user for all requests"""\n\
+    \n\
+    def __init__(self, get_response):\n\
+        self.get_response = get_response\n\
+        self._anonymous_user = None\n\
+        self._migrations_applied = False\n\
+        self._setup_complete = False\n\
+    \n\
+    def _ensure_migrations_and_user(self):\n\
+        """Ensure migrations are applied and anonymous user exists"""\n\
+        if self._setup_complete:\n\
+            return\n\
+            \n\
+        try:\n\
+            # Check if migrations need to be applied\n\
+            if not self._migrations_applied:\n\
+                print("Applying database migrations...")\n\
+                os.environ.setdefault("DJANGO_SETTINGS_MODULE", "vlamy_ocr.settings_no_auth")\n\
+                execute_from_command_line(["manage.py", "migrate", "--noinput"])\n\
+                self._migrations_applied = True\n\
+                print("Migrations applied successfully")\n\
+            \n\
+            # Create anonymous user\n\
+            if not self._anonymous_user:\n\
+                self._anonymous_user, created = User.objects.get_or_create(\n\
+                    username="anonymous",\n\
+                    defaults={\n\
+                        "email": "anonymous@example.com",\n\
+                        "first_name": "Anonymous",\n\
+                        "last_name": "User"\n\
+                    }\n\
+                )\n\
+                \n\
+                # Ensure user profile exists and is approved\n\
+                if hasattr(self._anonymous_user, "profile"):\n\
+                    if not self._anonymous_user.profile.is_approved:\n\
+                        self._anonymous_user.profile.is_approved = True\n\
+                        self._anonymous_user.profile.save()\n\
+                else:\n\
+                    from ocr_app.models import UserProfile\n\
+                    profile, profile_created = UserProfile.objects.get_or_create(\n\
+                        user=self._anonymous_user,\n\
+                        defaults={"is_approved": True}\n\
+                    )\n\
+                \n\
+                print(f"Anonymous user ready: created={created}, user_id={self._anonymous_user.id}")\n\
+                \n\
+            self._setup_complete = True\n\
+            \n\
+        except Exception as e:\n\
+            print(f"Error in middleware setup: {e}")\n\
+            # Fallback to Django AnonymousUser\n\
+            self._anonymous_user = AnonymousUser()\n\
+    \n\
+    def __call__(self, request):\n\
+        # Ensure setup is complete\n\
+        self._ensure_migrations_and_user()\n\
+        \n\
+        # Always assign the anonymous user to the request\n\
+        request.user = self._anonymous_user\n\
+        \n\
+        response = self.get_response(request)\n\
+        return response\n\
+' > /app/vlamy_ocr/middleware.py
+
+# Create a startup script for no-auth mode
+RUN echo '#!/bin/bash\n\
+\n\
+# Set the custom settings module\n\
+export DJANGO_SETTINGS_MODULE=vlamy_ocr.settings_no_auth\n\
+\n\
+echo "Starting VLAMy in browser-only mode (no authentication required)"\n\
+echo "Anonymous user will be created automatically on first request"\n\
+\n\
+# Start the Django development server (migrations will run automatically)\n\
+python manage.py runserver 0.0.0.0:$PORT\n\
+' > /app/start.sh
+
+# Set proper permissions for all files and ensure startup script is executable  
+RUN chmod -R 755 /app && \
+    chmod +x /app/start.sh && \
+    chown -R root:root /app
+
+# Environment variables for production (no-auth mode)
+ENV DEBUG=True
+ENV SECRET_KEY="browser-only-key-no-sensitive-data"
+ENV ALLOWED_HOSTS="*"
+ENV DJANGO_SETTINGS_MODULE="vlamy_ocr.settings_no_auth"
+
+# Expose port
+EXPOSE 7860
+
+# Start the application
+CMD ["/app/start.sh"] 
