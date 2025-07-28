@@ -9292,43 +9292,250 @@ class OCRApp {
             progressDiv.style.display = 'block';
             statusDiv.textContent = 'Fetching manifest...';
             
-            const response = await fetch(`${this.apiBaseUrl}/iiif/import/`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify({ 
-                    manifest_url: manifestUrl,
-                    max_width: maxWidth
-                })
-            });
-
-            if (response.ok) {
-                const result = await response.json();
-                statusDiv.textContent = `Success! Created project "${result.project.name}" with ${result.images_created} images.`;
-                
-                // Close modal after 2 seconds and refresh projects
-                setTimeout(() => {
-                    const modal = bootstrap.Modal.getInstance(document.getElementById('iiifImportModal'));
-                    modal.hide();
-                    this.loadProjects();
-                    progressDiv.style.display = 'none';
-                    document.getElementById('iiifManifestUrl').value = '';
-                    document.getElementById('iiifMaxWidth').value = '1000';
-                }, 2000);
-                
-                this.showAlert(result.message, 'success');
+            if (this.isBrowserCacheMode) {
+                // Handle IIIF import in browser cache mode
+                await this.importIIIFToBrowserCache(manifestUrl, maxWidth, statusDiv);
             } else {
-                const error = await response.json();
-                statusDiv.textContent = `Error: ${error.error}`;
-                this.showAlert(error.error || 'Import failed', 'danger');
+                // Handle IIIF import in server mode
+                const response = await fetch(`${this.apiBaseUrl}/iiif/import/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({ 
+                        manifest_url: manifestUrl,
+                        max_width: maxWidth
+                    })
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+                    statusDiv.textContent = `Success! Created project "${result.project.name}" with ${result.images_created} images.`;
+                    
+                    // Close modal after 2 seconds and refresh projects
+                    setTimeout(() => {
+                        const modal = bootstrap.Modal.getInstance(document.getElementById('iiifImportModal'));
+                        modal.hide();
+                        this.loadProjects();
+                        progressDiv.style.display = 'none';
+                        document.getElementById('iiifManifestUrl').value = '';
+                        document.getElementById('iiifMaxWidth').value = '1000';
+                    }, 2000);
+                    
+                    this.showAlert(result.message, 'success');
+                } else {
+                    const error = await response.json();
+                    statusDiv.textContent = `Error: ${error.error}`;
+                    this.showAlert(error.error || 'Import failed', 'danger');
+                }
             }
         } catch (error) {
             console.error('IIIF import error:', error);
             statusDiv.textContent = `Error: ${error.message}`;
             this.showAlert('Import failed', 'danger');
         }
+    }
+
+    async importIIIFToBrowserCache(manifestUrl, maxWidth, statusDiv) {
+        try {
+            // Ensure database is initialized
+            await this.localStorage.init();
+            
+            statusDiv.textContent = 'Fetching IIIF manifest...';
+            
+            // Fetch the IIIF manifest
+            const manifestResponse = await fetch(manifestUrl);
+            if (!manifestResponse.ok) {
+                throw new Error(`Failed to fetch manifest: ${manifestResponse.status}`);
+            }
+            
+            const manifest = await manifestResponse.json();
+            
+            // Validate it's a IIIF manifest
+            if (!manifest['@context']) {
+                throw new Error('Invalid IIIF manifest - missing @context');
+            }
+            
+            // Extract metadata
+            let title = manifest.label || 'IIIF Document';
+            if (Array.isArray(title)) {
+                title = title[0] || 'IIIF Document';
+            } else if (typeof title === 'object') {
+                title = Object.values(title)[0]?.[0] || 'IIIF Document';
+            }
+            
+            let description = manifest.description || '';
+            if (Array.isArray(description)) {
+                description = description[0] || '';
+            } else if (typeof description === 'object') {
+                description = Object.values(description)[0]?.[0] || '';
+            }
+            
+            statusDiv.textContent = 'Creating project and document...';
+            
+            // Create project
+            const existingProjects = await this.localStorage.getAll('projects');
+            const maxOrder = existingProjects.reduce((max, p) => Math.max(max, p.order || 0), 0);
+            
+            const projectData = {
+                name: `IIIF: ${title}`,
+                description: `Imported from IIIF manifest: ${manifestUrl}\n\n${description}`,
+                order: maxOrder + 1,
+                is_public: false
+            };
+            
+            const project = await this.localStorage.add('projects', projectData);
+            
+            // Create document
+            const documentData = {
+                name: title,
+                description: description,
+                project_id: project.id,
+                reading_order: 0,
+                default_transcription_type: 'full_image'
+            };
+            
+            const document = await this.localStorage.add('documents', documentData);
+            
+            // Extract canvases (support both IIIF 2.0 and 3.0)
+            let canvases = [];
+            
+            if (manifest.sequences) {
+                // IIIF 2.0 format
+                for (const sequence of manifest.sequences) {
+                    canvases = canvases.concat(sequence.canvases || []);
+                }
+            } else if (manifest.items) {
+                // IIIF 3.0 format
+                canvases = manifest.items;
+            }
+            
+            if (canvases.length === 0) {
+                throw new Error('No canvases found in manifest');
+            }
+            
+            statusDiv.textContent = `Processing ${canvases.length} images...`;
+            let imagesCreated = 0;
+            
+            // Process each canvas/image
+            for (let i = 0; i < canvases.length; i++) {
+                const canvas = canvases[i];
+                
+                try {
+                    statusDiv.textContent = `Processing image ${i + 1} of ${canvases.length}...`;
+                    
+                    // Extract canvas label
+                    let canvasLabel = canvas.label || `Image ${i + 1}`;
+                    if (Array.isArray(canvasLabel)) {
+                        canvasLabel = canvasLabel[0] || `Image ${i + 1}`;
+                    } else if (typeof canvasLabel === 'object') {
+                        canvasLabel = Object.values(canvasLabel)[0]?.[0] || `Image ${i + 1}`;
+                    }
+                    
+                    // Extract image URL (support both IIIF 2.0 and 3.0)
+                    let imageUrl = null;
+                    
+                    if (canvas.images) {
+                        // IIIF 2.0 format
+                        const imageAnnotation = canvas.images[0];
+                        if (imageAnnotation && imageAnnotation.resource) {
+                            imageUrl = imageAnnotation.resource['@id'] || imageAnnotation.resource.id;
+                        }
+                    } else if (canvas.items) {
+                        // IIIF 3.0 format
+                        const paintingAnnotation = canvas.items.find(item => 
+                            item.motivation === 'painting' && item.body
+                        );
+                        if (paintingAnnotation && paintingAnnotation.body) {
+                            imageUrl = paintingAnnotation.body.id;
+                        }
+                    }
+                    
+                    if (!imageUrl) {
+                        console.warn(`No image URL found for canvas ${i}`);
+                        continue;
+                    }
+                    
+                    // Add size parameter if it's an IIIF Image API URL
+                    if (imageUrl.includes('/full/') && maxWidth && maxWidth !== '1000') {
+                        imageUrl = imageUrl.replace('/full/', `/${maxWidth},/`);
+                    }
+                    
+                    // Download image and convert to base64
+                    const imageResponse = await fetch(imageUrl);
+                    if (!imageResponse.ok) {
+                        console.warn(`Failed to download image: ${imageUrl}`);
+                        continue;
+                    }
+                    
+                    const imageBlob = await imageResponse.blob();
+                    const base64Data = await this.blobToBase64(imageBlob);
+                    
+                    // Get image dimensions by creating a temporary image element
+                    const { width, height } = await this.getImageDimensions(base64Data);
+                    
+                    // Create image record
+                    const imageData = {
+                        name: canvasLabel,
+                        document_id: document.id,
+                        original_filename: `${canvasLabel.replace(/[^a-zA-Z0-9]/g, '_')}.jpg`,
+                        width: width,
+                        height: height,
+                        file_size: imageBlob.size,
+                        is_processed: true,
+                        order: i,
+                        image_file: base64Data // Store as base64 data URL
+                    };
+                    
+                    await this.localStorage.add('images', imageData);
+                    imagesCreated++;
+                    
+                } catch (imageError) {
+                    console.error(`Failed to process canvas ${i}:`, imageError);
+                    // Continue with next image
+                }
+            }
+            
+            statusDiv.textContent = `Success! Created project "${project.name}" with ${imagesCreated} images.`;
+            
+            // Close modal after 2 seconds and refresh projects
+            setTimeout(() => {
+                const modal = bootstrap.Modal.getInstance(document.getElementById('iiifImportModal'));
+                modal.hide();
+                this.loadProjects();
+                document.getElementById('iiifImportProgress').style.display = 'none';
+                document.getElementById('iiifManifestUrl').value = '';
+                document.getElementById('iiifMaxWidth').value = '1000';
+            }, 2000);
+            
+            this.showAlert(`IIIF manifest imported successfully! Created ${imagesCreated} images.`, 'success');
+            
+        } catch (error) {
+            throw new Error(`IIIF import failed: ${error.message}`);
+        }
+    }
+
+    // Helper method to convert blob to base64
+    async blobToBase64(blob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    // Helper method to get image dimensions from base64 data
+    async getImageDimensions(base64Data) {
+        return new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+                resolve({ width: img.width, height: img.height });
+            };
+            img.onerror = reject;
+            img.src = base64Data;
+        });
     }
 
     // Bulk Selection Methods
