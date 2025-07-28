@@ -9433,33 +9433,116 @@ class OCRApp {
                         canvasLabel = Object.values(canvasLabel)[0]?.[0] || `Image ${i + 1}`;
                     }
                     
-                    // Extract image URL (support both IIIF 2.0 and 3.0)
+                    // Extract image URL (support both IIIF 2.0 and 3.0 with multiple fallbacks)
                     let imageUrl = null;
                     
-                    if (canvas.images) {
+                    // Debug: log canvas structure only if we can't find an image URL
+                    // (moved this check to after URL extraction)
+                    
+                    if (canvas.images && canvas.images.length > 0) {
                         // IIIF 2.0 format
                         const imageAnnotation = canvas.images[0];
                         if (imageAnnotation && imageAnnotation.resource) {
-                            imageUrl = imageAnnotation.resource['@id'] || imageAnnotation.resource.id;
+                            imageUrl = imageAnnotation.resource['@id'] || 
+                                      imageAnnotation.resource.id ||
+                                      imageAnnotation.resource.service?.['@id'] ||
+                                      imageAnnotation.resource.service?.id;
+                            
+                            // If we found a service URL, construct the full image URL
+                            if (imageUrl && (imageUrl.includes('/info.json') || !imageUrl.includes('/full/'))) {
+                                // It's an IIIF Image API service, construct full image URL
+                                const serviceUrl = imageUrl.replace('/info.json', '');
+                                imageUrl = `${serviceUrl}/full/max/0/default.jpg`;
+                            }
                         }
-                    } else if (canvas.items) {
-                        // IIIF 3.0 format
-                        const paintingAnnotation = canvas.items.find(item => 
-                            item.motivation === 'painting' && item.body
-                        );
-                        if (paintingAnnotation && paintingAnnotation.body) {
-                            imageUrl = paintingAnnotation.body.id;
+                    } else if (canvas.items && canvas.items.length > 0) {
+                        // IIIF 3.0 format - handle nested AnnotationPage structure
+                        
+                        // Look through all items in the canvas
+                        for (const item of canvas.items) {
+                            if (imageUrl) break; // Found one, stop looking
+                            
+                            if (item.type === 'AnnotationPage' && item.items) {
+                                // This is an AnnotationPage containing Annotations
+                                const paintingAnnotation = item.items.find(annotation => 
+                                    annotation.motivation === 'painting' && annotation.body
+                                );
+                                
+                                if (paintingAnnotation && paintingAnnotation.body) {
+                                    if (Array.isArray(paintingAnnotation.body)) {
+                                        // Multiple bodies, find the image one
+                                        const imageBody = paintingAnnotation.body.find(body => 
+                                            body.type === 'Image' || body.format?.startsWith('image/')
+                                        );
+                                        imageUrl = imageBody?.id;
+                                    } else {
+                                        imageUrl = paintingAnnotation.body.id || paintingAnnotation.body['@id'];
+                                    }
+                                }
+                            } else if (item.motivation === 'painting' && item.body) {
+                                // Direct annotation (not in AnnotationPage)
+                                if (Array.isArray(item.body)) {
+                                    const imageBody = item.body.find(body => 
+                                        body.type === 'Image' || body.format?.startsWith('image/')
+                                    );
+                                    imageUrl = imageBody?.id;
+                                } else {
+                                    imageUrl = item.body.id || item.body['@id'];
+                                }
+                            }
+                        }
+                        
+                        // If still no URL, try the first item's body regardless of structure
+                        if (!imageUrl && canvas.items[0]) {
+                            const firstItem = canvas.items[0];
+                            if (firstItem.items && firstItem.items[0] && firstItem.items[0].body) {
+                                // AnnotationPage -> Annotation -> body
+                                const body = firstItem.items[0].body;
+                                imageUrl = body.id || body['@id'];
+                            } else if (firstItem.body) {
+                                // Direct body
+                                imageUrl = firstItem.body.id || firstItem.body['@id'];
+                            }
+                        }
+                    }
+                    
+                    // Approach 3: Try direct canvas properties (some manifests have this)
+                    if (!imageUrl) {
+                        if (canvas.service) {
+                            const service = Array.isArray(canvas.service) ? canvas.service[0] : canvas.service;
+                            if (service && (service.id || service['@id'])) {
+                                const serviceUrl = service.id || service['@id'];
+                                imageUrl = `${serviceUrl}/full/max/0/default.jpg`;
+                            }
+                        } else if (canvas['@id'] && canvas['@id'].includes('/canvas/')) {
+                            // Sometimes the canvas ID can help us construct the image URL
+                            console.log(`Canvas ${i} has @id but no clear image URL:`, canvas['@id']);
                         }
                     }
                     
                     if (!imageUrl) {
-                        console.warn(`No image URL found for canvas ${i}`);
+                        console.warn(`No image URL found for canvas ${i}. Canvas keys:`, Object.keys(canvas));
+                        if (i <= 5) {
+                            // Only show full structure for first few failed canvases to avoid spam
+                            console.warn(`Canvas ${i} full structure:`, canvas);
+                        }
                         continue;
                     }
                     
+                    console.log(`Canvas ${i}: Found image URL: ${imageUrl}`);
+                    
                     // Add size parameter if it's an IIIF Image API URL
-                    if (imageUrl.includes('/full/') && maxWidth && maxWidth !== '1000') {
-                        imageUrl = imageUrl.replace('/full/', `/${maxWidth},/`);
+                    if (imageUrl && maxWidth && maxWidth !== '1000') {
+                        if (imageUrl.includes('/full/max/0/default.jpg')) {
+                            // Replace max with specific width
+                            imageUrl = imageUrl.replace('/full/max/', `/full/${maxWidth},/`);
+                        } else if (imageUrl.includes('/full/full/0/default.jpg')) {
+                            // Replace second 'full' with width parameter
+                            imageUrl = imageUrl.replace('/full/full/', `/full/${maxWidth},/`);
+                        } else if (imageUrl.includes('/full/') && !imageUrl.includes(`${maxWidth},`)) {
+                            // Add width parameter to existing full URL
+                            imageUrl = imageUrl.replace('/full/', `/${maxWidth},/`);
+                        }
                     }
                     
                     // Download image and convert to base64
