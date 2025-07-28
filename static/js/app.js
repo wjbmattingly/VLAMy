@@ -4869,27 +4869,61 @@ class OCRApp {
     }
 
     async saveRename(type, id, newName) {
-        const endpoints = {
-            'project': `/api/projects/${id}/`,
-            'document': `/api/documents/${id}/`,
-            'image': `/api/images/${id}/`
-        };
-        
-        const response = await fetch(endpoints[type], {
-            method: 'PATCH',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Token ${localStorage.getItem('authToken')}`
-            },
-            body: JSON.stringify({ name: newName })
-        });
-        
-        if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.error || 'Failed to rename item');
+        if (this.isBrowserCacheMode) {
+            // Handle browser cache mode
+            try {
+                const storeNames = {
+                    'project': 'projects',
+                    'document': 'documents',
+                    'image': 'images'
+                };
+                
+                const storeName = storeNames[type];
+                if (!storeName) {
+                    throw new Error(`Unknown item type: ${type}`);
+                }
+                
+                // Get the current item
+                const item = await this.localStorage.get(storeName, id);
+                if (!item) {
+                    throw new Error(`${type.charAt(0).toUpperCase() + type.slice(1)} not found`);
+                }
+                
+                // Update the name
+                item.name = newName;
+                item.updated_at = new Date().toISOString();
+                
+                // Save back to browser cache
+                await this.localStorage.update(storeName, item);
+                
+                return item;
+            } catch (error) {
+                throw new Error(error.message || 'Failed to rename item');
+            }
+        } else {
+            // Handle server mode
+            const endpoints = {
+                'project': `/api/projects/${id}/`,
+                'document': `/api/documents/${id}/`,
+                'image': `/api/images/${id}/`
+            };
+            
+            const response = await fetch(endpoints[type], {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Token ${localStorage.getItem('authToken')}`
+                },
+                body: JSON.stringify({ name: newName })
+            });
+            
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || 'Failed to rename item');
+            }
+            
+            return response.json();
         }
-        
-        return response.json();
     }
 
     async moveItem(type, id, direction) {
@@ -4993,83 +5027,137 @@ class OCRApp {
     }
 
     async sendReorderData(type, siblings, movedItemId) {
-        switch (type) {
-            case 'project':
-                const projects = siblings.map((item, index) => ({
-                    id: item.dataset.projectId,
-                    order: index
-                }));
-                
-                const projectResponse = await fetch('/api/projects/reorder/', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Token ${localStorage.getItem('authToken')}`
-                    },
-                    body: JSON.stringify({ projects })
-                });
-                
-                if (!projectResponse.ok) throw new Error('Failed to reorder projects');
-                break;
-                
-            case 'document':
-                const projectId = this.getProjectIdForDocument(movedItemId);
-                const documents = siblings.map((item, index) => ({
-                    id: item.dataset.documentId,
-                    reading_order: index
-                }));
-                
-                console.log('Document reorder data:', { documents, project_id: projectId });
-                console.log('ProjectId for document', movedItemId, ':', projectId);
-                console.log('Documents array:', documents);
-                
-                const documentResponse = await fetch('/api/documents/reorder/', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Token ${localStorage.getItem('authToken')}`
-                    },
-                    body: JSON.stringify({ documents, project_id: projectId })
-                });
-                
-                if (!documentResponse.ok) {
-                    const errorText = await documentResponse.text();
-                    console.error('Document reorder error:', errorText);
-                    throw new Error('Failed to reorder documents');
-                }
-                break;
-                
-            case 'image':
-                const documentId = this.getDocumentIdForImage(movedItemId);
-                const images = siblings.map((item, index) => ({
-                    id: item.dataset.imageId,
-                    order: index
-                }));
-                
-                if (!documentId) {
-                    throw new Error('Document ID not found for image reordering');
-                }
-                
-                if (!this.isValidUUID(documentId)) {
-                    console.error('Invalid document ID:', documentId, 'for image:', movedItemId);
-                    console.error('Image element:', document.querySelector(`[data-image-id="${movedItemId}"]`));
-                    throw new Error(`Invalid document ID format: ${documentId}`);
-                }
-                
-                const imageResponse = await fetch('/api/images/reorder/', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Token ${localStorage.getItem('authToken')}`
-                    },
-                    body: JSON.stringify({ images, document_id: documentId })
-                });
-                
-                if (!imageResponse.ok) {
-                    const errorData = await imageResponse.json();
-                    throw new Error(`Failed to reorder images: ${errorData.error || 'Unknown error'}`);
-                }
-                break;
+        if (this.isBrowserCacheMode) {
+            // Handle browser cache mode reordering
+            switch (type) {
+                case 'project':
+                    const projectUpdates = siblings.map((item, index) => ({
+                        id: item.dataset.projectId,
+                        order: index
+                    }));
+                    
+                    for (const update of projectUpdates) {
+                        const project = await this.localStorage.get('projects', update.id);
+                        if (project) {
+                            project.order = update.order;
+                            project.updated_at = new Date().toISOString();
+                            await this.localStorage.update('projects', project);
+                        }
+                    }
+                    break;
+                    
+                case 'document':
+                    const documentUpdates = siblings.map((item, index) => ({
+                        id: item.dataset.documentId,
+                        reading_order: index
+                    }));
+                    
+                    for (const update of documentUpdates) {
+                        const document = await this.localStorage.get('documents', update.id);
+                        if (document) {
+                            document.reading_order = update.reading_order;
+                            document.updated_at = new Date().toISOString();
+                            await this.localStorage.update('documents', document);
+                        }
+                    }
+                    break;
+                    
+                case 'image':
+                    const imageUpdates = siblings.map((item, index) => ({
+                        id: item.dataset.imageId,
+                        order: index
+                    }));
+                    
+                    for (const update of imageUpdates) {
+                        const image = await this.localStorage.get('images', update.id);
+                        if (image) {
+                            image.order = update.order;
+                            image.updated_at = new Date().toISOString();
+                            await this.localStorage.update('images', image);
+                        }
+                    }
+                    break;
+            }
+        } else {
+            // Handle server mode reordering
+            switch (type) {
+                case 'project':
+                    const projects = siblings.map((item, index) => ({
+                        id: item.dataset.projectId,
+                        order: index
+                    }));
+                    
+                    const projectResponse = await fetch('/api/projects/reorder/', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Token ${localStorage.getItem('authToken')}`
+                        },
+                        body: JSON.stringify({ projects })
+                    });
+                    
+                    if (!projectResponse.ok) throw new Error('Failed to reorder projects');
+                    break;
+                    
+                case 'document':
+                    const projectId = this.getProjectIdForDocument(movedItemId);
+                    const documents = siblings.map((item, index) => ({
+                        id: item.dataset.documentId,
+                        reading_order: index
+                    }));
+                    
+                    console.log('Document reorder data:', { documents, project_id: projectId });
+                    console.log('ProjectId for document', movedItemId, ':', projectId);
+                    console.log('Documents array:', documents);
+                    
+                    const documentResponse = await fetch('/api/documents/reorder/', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Token ${localStorage.getItem('authToken')}`
+                        },
+                        body: JSON.stringify({ documents, project_id: projectId })
+                    });
+                    
+                    if (!documentResponse.ok) {
+                        const errorText = await documentResponse.text();
+                        console.error('Document reorder error:', errorText);
+                        throw new Error('Failed to reorder documents');
+                    }
+                    break;
+                    
+                case 'image':
+                    const documentId = this.getDocumentIdForImage(movedItemId);
+                    const images = siblings.map((item, index) => ({
+                        id: item.dataset.imageId,
+                        order: index
+                    }));
+                    
+                    if (!documentId) {
+                        throw new Error('Document ID not found for image reordering');
+                    }
+                    
+                    if (!this.isValidUUID(documentId)) {
+                        console.error('Invalid document ID:', documentId, 'for image:', movedItemId);
+                        console.error('Image element:', document.querySelector(`[data-image-id="${movedItemId}"]`));
+                        throw new Error(`Invalid document ID format: ${documentId}`);
+                    }
+                    
+                    const imageResponse = await fetch('/api/images/reorder/', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Token ${localStorage.getItem('authToken')}`
+                        },
+                        body: JSON.stringify({ images, document_id: documentId })
+                    });
+                    
+                    if (!imageResponse.ok) {
+                        const errorData = await imageResponse.json();
+                        throw new Error(`Failed to reorder images: ${errorData.error || 'Unknown error'}`);
+                    }
+                    break;
+            }
         }
     }
 
@@ -5577,25 +5665,45 @@ class OCRApp {
         }
         
         try {
-            const response = await fetch(`/api/projects/${targetProjectId}/move_document/`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${localStorage.getItem('authToken')}`
-                },
-                body: JSON.stringify({ document_id: documentId })
-            });
-            
-            if (response.ok) {
+            if (this.isBrowserCacheMode) {
+                // Handle browser cache mode
+                const document = await this.localStorage.get('documents', documentId);
+                if (!document) {
+                    throw new Error('Document not found');
+                }
+                
+                // Update the document's project_id
+                document.project_id = targetProjectId;
+                document.updated_at = new Date().toISOString();
+                
+                // Save the updated document
+                await this.localStorage.update('documents', document);
+                
                 this.showAlert('Document moved successfully!', 'success');
-                const modal = bootstrap.Modal.getInstance(document.getElementById('moveToProjectModal'));
-                modal.hide();
-                this.loadStructureData(); // Refresh structure modal
-                this.loadProjects(); // Refresh main tree
             } else {
-                const errorData = await response.json();
-                this.showAlert(`Failed to move document: ${errorData.error}`, 'error');
+                // Handle server mode
+                const response = await fetch(`/api/projects/${targetProjectId}/move_document/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${localStorage.getItem('authToken')}`
+                    },
+                    body: JSON.stringify({ document_id: documentId })
+                });
+                
+                if (response.ok) {
+                    this.showAlert('Document moved successfully!', 'success');
+                } else {
+                    const errorData = await response.json();
+                    this.showAlert(`Failed to move document: ${errorData.error}`, 'error');
+                    return;
+                }
             }
+            
+            const modal = bootstrap.Modal.getInstance(document.getElementById('moveToProjectModal'));
+            modal.hide();
+            this.loadStructureData(); // Refresh structure modal
+            this.loadProjects(); // Refresh main tree
         } catch (error) {
             this.showAlert('Failed to move document', 'error');
         }
@@ -5610,33 +5718,53 @@ class OCRApp {
         }
         
         try {
-            const response = await fetch(`/api/documents/${targetDocumentId}/move_image/`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${localStorage.getItem('authToken')}`
-                },
-                body: JSON.stringify({ image_id: imageId })
-            });
-            
-            if (response.ok) {
-                this.showAlert('Image moved successfully!', 'success');
-                const modal = bootstrap.Modal.getInstance(document.getElementById('moveToDocumentModal'));
-                modal.hide();
-                
-                // Refresh structure modal views
-                const currentProjectId = document.querySelector('.project-structure-item.selected')?.dataset.projectId;
-                const currentDocumentId = document.querySelector('.document-structure-item.selected')?.dataset.documentId;
-                
-                if (currentProjectId) {
-                    await this.selectStructureProject(currentProjectId);
-                    if (currentDocumentId) {
-                        await this.selectStructureDocument(currentDocumentId);
-                    }
+            if (this.isBrowserCacheMode) {
+                // Handle browser cache mode
+                const image = await this.localStorage.get('images', imageId);
+                if (!image) {
+                    throw new Error('Image not found');
                 }
+                
+                // Update the image's document_id
+                image.document_id = targetDocumentId;
+                image.updated_at = new Date().toISOString();
+                
+                // Save the updated image
+                await this.localStorage.update('images', image);
+                
+                this.showAlert('Image moved successfully!', 'success');
             } else {
-                const errorData = await response.json();
-                this.showAlert(`Failed to move image: ${errorData.error}`, 'error');
+                // Handle server mode
+                const response = await fetch(`/api/documents/${targetDocumentId}/move_image/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${localStorage.getItem('authToken')}`
+                    },
+                    body: JSON.stringify({ image_id: imageId })
+                });
+                
+                if (response.ok) {
+                    this.showAlert('Image moved successfully!', 'success');
+                } else {
+                    const errorData = await response.json();
+                    this.showAlert(`Failed to move image: ${errorData.error}`, 'error');
+                    return;
+                }
+            }
+            
+            const modal = bootstrap.Modal.getInstance(document.getElementById('moveToDocumentModal'));
+            modal.hide();
+            
+            // Refresh structure modal views
+            const currentProjectId = document.querySelector('.project-structure-item.selected')?.dataset.projectId;
+            const currentDocumentId = document.querySelector('.document-structure-item.selected')?.dataset.documentId;
+            
+            if (currentProjectId) {
+                await this.selectStructureProject(currentProjectId);
+                if (currentDocumentId) {
+                    await this.selectStructureDocument(currentDocumentId);
+                }
             }
         } catch (error) {
             console.error('Move image error:', error);
@@ -8909,11 +9037,8 @@ class OCRApp {
     }
 
     async deleteSelectedAnnotations() {
-        console.log('deleteSelectedAnnotations called, isBrowserCacheMode:', this.isBrowserCacheMode);
-        
         if (this.canvas && this.canvas.getActiveObjects().length > 0) {
             const objectsToDelete = this.canvas.getActiveObjects();
-            console.log('Objects to delete:', objectsToDelete.length, objectsToDelete.map(o => ({id: o.annotationId, temp: o.annotationId?.startsWith('temp_')})));
             
             for (const obj of objectsToDelete) {
                 if (obj.annotationId) {
@@ -8921,12 +9046,9 @@ class OCRApp {
                     if (!obj.annotationId.startsWith('temp_')) {
                         try {
                             if (this.isBrowserCacheMode) {
-                                console.log('Deleting annotation from browser cache:', obj.annotationId);
                                 // Delete from browser cache
                                 await this.localStorage.delete('annotations', obj.annotationId);
-                                console.log('Successfully deleted annotation from cache:', obj.annotationId);
                             } else {
-                                console.log('Deleting annotation from server:', obj.annotationId);
                                 // Use server API
                                 await fetch(`${this.apiBaseUrl}/annotations/${obj.annotationId}/`, {
                                     method: 'DELETE',
@@ -8934,30 +9056,22 @@ class OCRApp {
                                         'Authorization': `Token ${this.authToken}`
                                     }
                                 });
-                                console.log('Successfully deleted annotation from server:', obj.annotationId);
                             }
                         } catch (error) {
                             console.error('Error deleting annotation:', obj.annotationId, error);
                         }
-                    } else {
-                        console.log('Skipping temp annotation:', obj.annotationId);
                     }
                     
                     // Remove from local annotations array
                     this.annotations = this.annotations.filter(a => a.id !== obj.annotationId);
-                    console.log('Removed annotation from local array:', obj.annotationId);
                 }
                 
                 // Remove from canvas
                 this.canvas.remove(obj);
-                console.log('Removed object from canvas');
             }
             
             this.canvas.discardActiveObject();
             this.updateAnnotationsList();
-            console.log('deleteSelectedAnnotations completed');
-        } else {
-            console.log('No objects selected for deletion');
         }
     }
 
