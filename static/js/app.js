@@ -1,5 +1,266 @@
 // VLAMy OCR Application JavaScript
 
+// Local Storage Manager for Browser Cache Mode
+class LocalStorageManager {
+    constructor() {
+        this.dbName = 'VLAMyOCR';
+        this.dbVersion = 2;
+        this.db = null;
+        this.isInitialized = false;
+    }
+
+    async init() {
+        if (this.isInitialized) return;
+        
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open(this.dbName, this.dbVersion);
+            
+            request.onerror = () => reject(request.error);
+            request.onsuccess = () => {
+                this.db = request.result;
+                this.isInitialized = true;
+                resolve();
+            };
+            
+            request.onupgradeneeded = (event) => {
+                const db = event.target.result;
+                
+                // Create object stores
+                if (!db.objectStoreNames.contains('projects')) {
+                    const projectStore = db.createObjectStore('projects', { keyPath: 'id' });
+                    projectStore.createIndex('order', 'order');
+                }
+                
+                if (!db.objectStoreNames.contains('documents')) {
+                    const documentStore = db.createObjectStore('documents', { keyPath: 'id' });
+                    documentStore.createIndex('project_id', 'project_id');
+                }
+                
+                if (!db.objectStoreNames.contains('images')) {
+                    const imageStore = db.createObjectStore('images', { keyPath: 'id' });
+                    imageStore.createIndex('document_id', 'document_id');
+                    imageStore.createIndex('order', 'order');
+                }
+                
+                if (!db.objectStoreNames.contains('annotations')) {
+                    const annotationStore = db.createObjectStore('annotations', { keyPath: 'id' });
+                    annotationStore.createIndex('image_id', 'image_id');
+                    annotationStore.createIndex('reading_order', 'reading_order');
+                }
+                
+                // Handle transcriptions store - recreate with correct indexes if upgrading
+                if (db.objectStoreNames.contains('transcriptions')) {
+                    db.deleteObjectStore('transcriptions');
+                }
+                const transcriptionStore = db.createObjectStore('transcriptions', { keyPath: 'id' });
+                transcriptionStore.createIndex('image', 'image');
+                transcriptionStore.createIndex('annotation', 'annotation');
+                
+                if (!db.objectStoreNames.contains('user_settings')) {
+                    db.createObjectStore('user_settings', { keyPath: 'key' });
+                }
+            };
+        });
+    }
+
+    generateId() {
+        return 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    }
+
+    async add(storeName, data) {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([storeName], 'readwrite');
+            const store = transaction.objectStore(storeName);
+            
+            if (!data.id) {
+                data.id = this.generateId();
+            }
+            data.created_at = new Date().toISOString();
+            data.updated_at = new Date().toISOString();
+            
+            const request = store.add(data);
+            request.onsuccess = () => resolve(data);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async update(storeName, data) {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([storeName], 'readwrite');
+            const store = transaction.objectStore(storeName);
+            
+            data.updated_at = new Date().toISOString();
+            
+            const request = store.put(data);
+            request.onsuccess = () => resolve(data);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async get(storeName, id) {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([storeName], 'readonly');
+            const store = transaction.objectStore(storeName);
+            const request = store.get(id);
+            
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async getAll(storeName, indexName = null, value = null) {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([storeName], 'readonly');
+            const store = transaction.objectStore(storeName);
+            
+            let request;
+            if (indexName && value !== null) {
+                const index = store.index(indexName);
+                request = index.getAll(value);
+            } else {
+                request = store.getAll();
+            }
+            
+            request.onsuccess = () => resolve(request.result || []);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async delete(storeName, id) {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([storeName], 'readwrite');
+            const store = transaction.objectStore(storeName);
+            const request = store.delete(id);
+            
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async getSetting(key) {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction(['user_settings'], 'readonly');
+            const store = transaction.objectStore('user_settings');
+            const request = store.get(key);
+            
+            request.onsuccess = () => resolve(request.result ? request.result.value : null);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async setSetting(key, value) {
+        await this.init();
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction(['user_settings'], 'readwrite');
+            const store = transaction.objectStore('user_settings');
+            const request = store.put({ key, value });
+            
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    // File handling for images
+    async fileToBase64(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = () => reject(reader.error);
+            reader.readAsDataURL(file);
+        });
+    }
+
+    async base64ToBlob(base64) {
+        const response = await fetch(base64);
+        return response.blob();
+    }
+
+    // Export all browser cache data
+    async exportBrowserCacheData() {
+        const data = {
+            projects: await this.getAll('projects'),
+            documents: await this.getAll('documents'),
+            images: await this.getAll('images'),
+            annotations: await this.getAll('annotations'),
+            transcriptions: await this.getAll('transcriptions'),
+            settings: {
+                custom_prompts: await this.getSetting('custom_prompts'),
+                custom_zones: await this.getSetting('custom_zones'),
+                zone_colors: await this.getSetting('zone_colors'),
+                enabled_zone_types: await this.getSetting('enabled_zone_types'),
+                enabled_line_types: await this.getSetting('enabled_line_types'),
+                custom_detection_mappings: await this.getSetting('custom_detection_mappings')
+            },
+            exported_at: new Date().toISOString(),
+            version: '1.0'
+        };
+        return data;
+    }
+
+    // Import browser cache data
+    async importBrowserCacheData(data) {
+        try {
+            // Import projects
+            if (data.projects) {
+                for (const project of data.projects) {
+                    await this.add('projects', project);
+                }
+            }
+
+            // Import documents
+            if (data.documents) {
+                for (const document of data.documents) {
+                    await this.add('documents', document);
+                }
+            }
+
+            // Import images
+            if (data.images) {
+                for (const image of data.images) {
+                    await this.add('images', image);
+                }
+            }
+
+            // Import annotations
+            if (data.annotations) {
+                console.log('Importing', data.annotations.length, 'annotations');
+                for (const annotation of data.annotations) {
+                    await this.add('annotations', annotation);
+                }
+                console.log('✅ All annotations imported');
+            }
+
+            // Import transcriptions
+            if (data.transcriptions) {
+                console.log('Importing', data.transcriptions.length, 'transcriptions');
+                for (const transcription of data.transcriptions) {
+                    await this.add('transcriptions', transcription);
+                }
+            }
+
+            // Import settings
+            if (data.settings) {
+                for (const [key, value] of Object.entries(data.settings)) {
+                    if (value !== null && value !== undefined) {
+                        await this.setSetting(key, value);
+                    }
+                }
+            }
+
+            return true;
+        } catch (error) {
+            console.error('Error importing browser cache data:', error);
+            return false;
+        }
+    }
+}
+
 class OCRApp {
     constructor() {
         this.apiBaseUrl = '/api';
@@ -14,6 +275,10 @@ class OCRApp {
         this.isCreatingAnnotation = false;
         this.annotations = [];
         this.selectedAnnotations = [];
+        
+        // Browser cache mode
+        this.isBrowserCacheMode = localStorage.getItem('browserCacheMode') === 'true';
+        this.localStorage = new LocalStorageManager();
         
         // Panel state tracking
         this.leftPanelWidth = null;
@@ -50,125 +315,774 @@ class OCRApp {
         this.selectedItems = new Set();
         this.pendingDeleteItems = null;
         
-            // Export tracking
-    this.currentExportJob = null;
-    
-    this.init();
-}
-
-// Debug helper function to diagnose prompt/classification issues
-debugPromptClassifications() {
-    console.group('🔍 Prompt & Classification Debug Info');
-    
-    // Show all available zone types
-    console.log('📝 Available Zone Types:');
-    if (this.annotationTypes) {
-        this.annotationTypes.all_types.zones.forEach(zone => {
-            console.log(`  • ${zone.label} (value: "${zone.value}")`);
-        });
-    }
-    
-    // Show custom zones
-    if (this.customZones.length > 0) {
-        console.log('🎨 Custom Zones:');
-        this.customZones.forEach(zone => {
-            console.log(`  • ${zone.label} (value: "${zone.value}")`);
-        });
-    }
-    
-    // Show current prompts and their zones
-    console.log('💬 Current Prompts:');
-    this.customPrompts.forEach(prompt => {
-        console.log(`  • "${prompt.name}": zones [${prompt.zones.join(', ')}]`);
-    });
-    
-    // Show current annotations and their classifications
-    if (this.annotations.length > 0) {
-        console.log('📍 Current Annotations:');
-        this.annotations.forEach((ann, i) => {
-            const prompt = this.getPromptForAnnotation(ann);
-            console.log(`  • Annotation ${i+1}: classification "${ann.classification}" → prompt "${prompt.name || 'default'}"`);
-        });
-    }
-    
-    // Show detection mappings
-    if (this.currentUser && this.currentUser.custom_detection_mappings) {
-        console.log('🔄 Detection Mappings:');
-        Object.entries(this.currentUser.custom_detection_mappings).forEach(([from, to]) => {
-            console.log(`  • "${from}" → "${to}"`);
-        });
-    }
-    
-    console.groupEnd();
-}
-
-// Helper function to ensure prompts include main zone types
-async ensureMainZonePrompt() {
-    if (!this.annotationTypes || !this.customPrompts) return;
-    
-    // Find the main zone type value
-    const mainZoneType = this.annotationTypes.all_types.zones.find(z => 
-        z.label.toLowerCase().includes('main') || z.value.toLowerCase().includes('main')
-    );
-    
-    if (!mainZoneType) {
-        console.log('No main zone type found in annotation types');
-        return;
-    }
-    
-    // Check if any prompt includes the main zone
-    const hasMainZonePrompt = this.customPrompts.some(prompt => 
-        prompt.zones && prompt.zones.includes(mainZoneType.value)
-    );
-    
-    if (!hasMainZonePrompt) {
-        console.log(`Creating default prompt for Main Zone (${mainZoneType.value})`);
+        // Export tracking
+        this.currentExportJob = null;
         
-        // Create a default prompt for Main Zone
-        const mainZonePrompt = {
-            id: 'main_zone_default_' + Date.now(),
-            name: 'Main Zone Default',
-            prompt: 'Transcribe this text accurately, preserving formatting and structure.',
-            zones: [mainZoneType.value],
-            metadata_fields: [
-                { name: 'handwritten', type: 'boolean', default: false },
-                { name: 'typed', type: 'boolean', default: true },
-                { name: 'language', type: 'string', default: 'en' }
-            ],
-            is_default: false
+        this.init();
+        
+        // Add debugging function to window for console access
+        window.debugVLAMy = () => this.debugBrowserCacheData();
+        
+        // Add emergency loading clear function
+        window.clearVLAMyLoading = () => {
+            console.log('Emergency loading clear triggered');
+            this.showLoading(false);
         };
-        
-        const updatedPrompts = [...this.customPrompts, mainZonePrompt];
-        
+    }
+
+    // Browser cache export/import methods
+    async exportBrowserCacheData(format = 'json') {
+        if (!this.isBrowserCacheMode) {
+            this.showAlert('Export is only available in Browser Cache Mode', 'warning');
+            return;
+        }
+
         try {
-            // Save to backend
-            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify({
-                    custom_prompts: updatedPrompts
-                })
-            });
+            const data = await this.localStorage.exportBrowserCacheData();
             
-            if (response.ok) {
-                this.customPrompts = updatedPrompts;
-                this.populatePromptsList();
-                console.log('✅ Main Zone prompt created successfully');
-                this.showAlert('Main Zone prompt created automatically', 'info');
+            if (format === 'zip') {
+                await this.exportAsZip(data);
+            } else {
+                await this.exportAsJson(data);
             }
+            
+            this.showAlert(`Browser cache data exported as ${format.toUpperCase()} successfully!`, 'success');
         } catch (error) {
-            console.error('Error creating main zone prompt:', error);
+            console.error('Export error:', error);
+            this.showAlert('Failed to export browser cache data', 'danger');
         }
     }
-}
 
+    async exportAsJson(data) {
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `vlamy-browser-cache-${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    async exportAsZip(data) {
+        const zip = new JSZip();
+        const dateStr = new Date().toISOString().split('T')[0];
+        
+        // Add metadata JSON file
+        const metadataClone = JSON.parse(JSON.stringify(data));
+        
+        // Extract images to separate files and update metadata references
+        if (metadataClone.images) {
+            metadataClone.images.forEach((image, index) => {
+                if (image.image_file && image.image_file.startsWith('data:')) {
+                    // Extract base64 image
+                    const [header, base64Data] = image.image_file.split(',');
+                    const mimeType = header.match(/data:([^;]+)/)[1];
+                    const extension = mimeType.split('/')[1];
+                    const fileName = `images/${image.original_filename || `image_${index}.${extension}`}`;
+                    
+                    // Add image to ZIP
+                    zip.file(fileName, base64Data, { base64: true });
+                    
+                    // Update metadata reference
+                    image.image_file = fileName;
+                    image.image_url = fileName;
+                }
+            });
+        }
+        
+        // Add metadata file
+        zip.file('vlamy_export.json', JSON.stringify(metadataClone, null, 2));
+        
+        // Generate ZIP and download
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const url = URL.createObjectURL(zipBlob);
+        
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `vlamy-browser-cache-${dateStr}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    async importBrowserCacheData(file) {
+        if (!this.isBrowserCacheMode) {
+            this.showAlert('Import is only available in Browser Cache Mode', 'warning');
+            return;
+        }
+
+        try {
+            let data;
+            
+            if (file.name.toLowerCase().endsWith('.json')) {
+                // Handle JSON import
+                const text = await file.text();
+                data = JSON.parse(text);
+            } else if (file.name.toLowerCase().endsWith('.zip')) {
+                // Handle ZIP import
+                data = await this.extractZipImport(file);
+                if (!data) return; // Error already shown in extractZipImport
+            } else {
+                this.showAlert('Unsupported file format. Please use JSON or ZIP files.', 'warning');
+                return;
+            }
+            
+
+            
+            const success = await this.localStorage.importBrowserCacheData(data);
+            
+            if (success) {
+                await this.loadBrowserCacheSettings();
+                await this.loadProjects();
+                this.showAlert('Browser cache data imported successfully!', 'success');
+            } else {
+                this.showAlert('Failed to import browser cache data', 'danger');
+            }
+        } catch (error) {
+            console.error('Import error:', error);
+            this.showAlert('Failed to import browser cache data. Please check the file format.', 'danger');
+        }
+    }
+
+    showBrowserCacheExportModal() {
+        if (!this.isBrowserCacheMode) return;
+        
+        // Create modal HTML if it doesn't exist
+        let modal = document.getElementById('browserCacheExportModal');
+        if (!modal) {
+            const modalHtml = `
+                <div class="modal fade" id="browserCacheExportModal" tabindex="-1">
+                    <div class="modal-dialog">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title">
+                                    <i class="fas fa-database me-2"></i>Browser Cache Data
+                                </h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="alert alert-info">
+                                    <i class="fas fa-info-circle me-2"></i>
+                                    Export your browser cache data as a JSON file for backup, or import a previously exported file.
+                                </div>
+                                
+                                <div class="row">
+                                    <div class="col-md-6">
+                                        <div class="card">
+                                            <div class="card-header">
+                                                <h6><i class="fas fa-download me-2"></i>Export Data</h6>
+                                            </div>
+                                            <div class="card-body text-center">
+                                                                                                 <p class="text-muted">Download all your projects, images, and annotations.</p>
+                                                <div class="btn-group d-grid">
+                                                    <button class="btn btn-primary" onclick="app.exportBrowserCacheData('json')">
+                                                        <i class="fas fa-download me-2"></i>Export JSON
+                                                    </button>
+                                                    <button class="btn btn-success" onclick="app.exportBrowserCacheData('zip')">
+                                                        <i class="fas fa-file-archive me-2"></i>Export ZIP
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="card">
+                                            <div class="card-header">
+                                                <h6><i class="fas fa-upload me-2"></i>Import Data</h6>
+                                            </div>
+                                                                                         <div class="card-body text-center">
+                                                 <p class="text-muted">Load a previously exported JSON or ZIP file to restore your data.</p>
+                                                                                                 <input type="file" id="browserCacheImportFile" accept=".json,.zip" style="display: none" onchange="app.handleBrowserCacheImport(this)">
+                                                <button class="btn btn-success" onclick="document.getElementById('browserCacheImportFile').click()">
+                                                    <i class="fas fa-upload me-2"></i>Import Data
+                                                </button>
+                                                <div class="mt-2">
+                                                    <small class="text-muted">Supports JSON and ZIP files</small>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="row mt-3">
+                                    <div class="col-12">
+                                        <div class="card border-danger">
+                                            <div class="card-header bg-danger text-white">
+                                                <h6 class="mb-0"><i class="fas fa-trash-alt me-2"></i>Clear Browser Cache</h6>
+                                            </div>
+                                            <div class="card-body text-center">
+                                                <p class="text-muted">Permanently delete all your local data and reset browser cache.</p>
+                                                <button class="btn btn-danger" onclick="app.clearBrowserCache()">
+                                                    <i class="fas fa-trash-alt me-2"></i>Clear All Data
+                                                </button>
+                                                <div class="mt-2">
+                                                    <small class="text-danger">⚠️ This action cannot be undone</small>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.insertAdjacentHTML('beforeend', modalHtml);
+        }
+        
+        const bsModal = new bootstrap.Modal(document.getElementById('browserCacheExportModal'));
+        bsModal.show();
+    }
+
+    handleBrowserCacheImport(input) {
+        const file = input.files[0];
+        if (file) {
+            this.importBrowserCacheData(file);
+            // Reset the input
+            input.value = '';
+        }
+    }
+
+    async extractZipImport(zipFile) {
+        try {
+            console.log('Starting ZIP import, file size:', zipFile.size);
+            const zip = new JSZip();
+            const zipData = await zip.loadAsync(zipFile);
+            console.log('ZIP loaded successfully, found files:', Object.keys(zipData.files));
+            
+            // Look for VLAMy export structure
+            let metadataFile = null;
+            const imageFiles = {};
+            const jsonFiles = [];
+            
+            // First pass - identify all files
+            Object.keys(zipData.files).forEach(fileName => {
+                const file = zipData.files[fileName];
+                console.log(`File: ${fileName}, isDir: ${file.dir}, size: ${file._data ? file._data.uncompressedSize : 'unknown'}`);
+                
+                if (fileName.toLowerCase().endsWith('.json') && !file.dir) {
+                    jsonFiles.push(fileName);
+                }
+            });
+            
+            console.log('Found JSON files:', jsonFiles);
+            
+            // Find the metadata JSON file - be more flexible
+            await Promise.all(Object.keys(zipData.files).map(async (fileName) => {
+                const file = zipData.files[fileName];
+                
+                if (fileName.toLowerCase().endsWith('.json') && !file.dir) {
+                    console.log('Processing JSON file:', fileName);
+                    try {
+                        const content = await file.async('text');
+                        console.log(`JSON file ${fileName} content preview:`, content.substring(0, 200));
+                        const jsonData = JSON.parse(content);
+                        
+                                                 // More flexible metadata detection
+                         const hasVLAMyData = jsonData.projects || jsonData.images || jsonData.documents || 
+                                            jsonData.annotations || jsonData.user_settings ||
+                                            (jsonData.export_metadata && jsonData.export_metadata.app === 'VLAMy') ||
+                                            // Check if it's a direct export with nested structure
+                                            (Array.isArray(jsonData.projects) || Array.isArray(jsonData.images)) ||
+                                            // Check if it's a single project export from server
+                                            (jsonData.project_id && jsonData.name && (jsonData.owner || jsonData.created_at));
+                        
+                                                 console.log(`JSON file ${fileName} analysis:`, {
+                             hasProjects: !!jsonData.projects,
+                             hasImages: !!jsonData.images,
+                             hasDocuments: !!jsonData.documents,
+                             hasAnnotations: !!jsonData.annotations,
+                             hasUserSettings: !!jsonData.user_settings,
+                             hasExportMetadata: !!jsonData.export_metadata,
+                             isSingleProject: !!(jsonData.project_id && jsonData.name),
+                             topLevelKeys: Object.keys(jsonData).slice(0, 10)
+                         });
+                        
+                        if (hasVLAMyData) {
+                            metadataFile = jsonData;
+                            console.log('✅ Found VLAMy metadata JSON:', fileName);
+                        } else {
+                            console.log('❌ JSON file does not contain VLAMy data:', fileName);
+                        }
+                    } catch (e) {
+                        console.log('❌ Failed to parse JSON file:', fileName, e.message);
+                    }
+                } else if (fileName.match(/\.(jpg|jpeg|png|tiff|tif|bmp|gif)$/i)) {
+                    console.log('Processing image file:', fileName);
+                    // Image file - convert to base64
+                    const imageBlob = await file.async('blob');
+                    const base64 = await this.blobToBase64(imageBlob);
+                    imageFiles[fileName] = base64;
+                }
+            }));
+            
+            if (!metadataFile) {
+                console.log('No VLAMy metadata found. Available JSON files:', jsonFiles);
+                if (jsonFiles.length > 0) {
+                    // Try to use the first JSON file if no clear metadata was found
+                    console.log('Attempting to use first JSON file as metadata:', jsonFiles[0]);
+                    try {
+                        const firstJsonFile = zipData.files[jsonFiles[0]];
+                        const content = await firstJsonFile.async('text');
+                        metadataFile = JSON.parse(content);
+                        console.log('Using first JSON file as metadata:', jsonFiles[0]);
+                        this.showAlert('No clear VLAMy metadata found, using first JSON file. Some data may not import correctly.', 'warning');
+                    } catch (e) {
+                        console.error('Failed to parse first JSON file:', e);
+                        this.showAlert('Invalid ZIP file: No valid JSON metadata found', 'danger');
+                        return null;
+                    }
+                } else {
+                    this.showAlert('Invalid ZIP file: No JSON metadata found', 'danger');
+                    return null;
+                }
+            }
+            
+            console.log('Processing metadata file. Type:', metadataFile.project_id ? 'Single Project Export' : 'Browser Cache Export');
+            
+            // Convert single project export to browser cache format if needed
+            if (metadataFile.project_id && metadataFile.name && !metadataFile.projects) {
+                console.log('Converting single project export to browser cache format');
+                const convertedMetadata = await this.convertServerExportToBrowserCache(metadataFile, imageFiles, zipData);
+                if (convertedMetadata) {
+                    metadataFile = convertedMetadata;
+                    console.log('Conversion completed successfully');
+                } else {
+                    this.showAlert('Failed to convert server export format', 'danger');
+                    return null;
+                }
+            }
+            
+            // Update image paths in metadata to use base64
+            if (metadataFile.images) {
+                metadataFile.images.forEach(image => {
+                    // Find corresponding image file in ZIP
+                    const imagePath = Object.keys(imageFiles).find(path => 
+                        path.includes(image.original_filename) || 
+                        path.endsWith(image.image_file.split('/').pop())
+                    );
+                    
+                    if (imagePath) {
+                        image.image_file = imageFiles[imagePath];
+                        image.image_url = imageFiles[imagePath];
+                    }
+                });
+            }
+            
+            this.showAlert('ZIP file extracted successfully!', 'success');
+            return metadataFile;
+            
+        } catch (error) {
+            console.error('ZIP extraction error:', error);
+            this.showAlert('Failed to extract ZIP file. Please check the file format.', 'danger');
+            return null;
+        }
+    }
+
+    async convertServerExportToBrowserCache(projectMetadata, imageFiles, zipData) {
+        try {
+            console.log('Converting server export, project metadata:', projectMetadata);
+            console.log('Available image files:', Object.keys(imageFiles));
+            console.log('All ZIP files:', Object.keys(zipData.files));
+            
+            // Create browser cache format structure
+            const browserCacheData = {
+                projects: [],
+                documents: [],
+                images: [],
+                annotations: [],
+                transcriptions: [],
+                user_settings: {}
+            };
+            
+            // Create project
+            const project = {
+                id: `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                name: projectMetadata.name,
+                description: projectMetadata.description || '',
+                created_at: projectMetadata.created_at || new Date().toISOString(),
+                updated_at: projectMetadata.updated_at || new Date().toISOString(),
+                order: 0
+            };
+            browserCacheData.projects.push(project);
+            
+            // Create document (one document per project in server exports)
+            const document = {
+                id: `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                project_id: project.id,
+                name: projectMetadata.name + ' Document',
+                description: '',
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+            };
+            browserCacheData.documents.push(document);
+            
+            // Process images and extract annotations from XML files
+            let imageOrder = 0;
+            for (const [imagePath, base64Data] of Object.entries(imageFiles)) {
+                console.log('Processing image:', imagePath);
+                
+                // Extract filename from path
+                const fileName = imagePath.split('/').pop();
+                const baseName = fileName.split('.')[0];
+                
+                // Create image record
+                const image = {
+                    id: `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                    document_id: document.id,
+                    original_filename: fileName,
+                    image_file: base64Data,
+                    image_url: base64Data,
+                    order: imageOrder++,
+                    created_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString()
+                };
+                browserCacheData.images.push(image);
+                
+                // Look for corresponding XML file with annotations
+                const xmlPath = Object.keys(zipData.files).find(path => 
+                    path.includes(baseName) && path.toLowerCase().endsWith('.xml')
+                );
+                
+                if (xmlPath) {
+                    console.log('Found XML file for image:', xmlPath);
+                                         try {
+                         const xmlContent = await zipData.files[xmlPath].async('text');
+                         const annotations = this.parsePageXMLAnnotations(xmlContent, image.id);
+                         
+                         // Add annotations and extract transcriptions
+                         annotations.forEach(annotation => {
+                             browserCacheData.annotations.push(annotation);
+                             
+                             // Add transcription if available
+                             if (annotation._transcription) {
+                                 browserCacheData.transcriptions.push(annotation._transcription);
+                                 delete annotation._transcription; // Clean up temporary property
+                             }
+                         });
+                         
+                         console.log(`Extracted ${annotations.length} annotations from ${xmlPath}`);
+                     } catch (e) {
+                         console.error('Failed to parse XML file:', xmlPath, e);
+                     }
+                }
+            }
+            
+            console.log('Conversion result:', {
+                projects: browserCacheData.projects.length,
+                documents: browserCacheData.documents.length,
+                images: browserCacheData.images.length,
+                annotations: browserCacheData.annotations.length,
+                transcriptions: browserCacheData.transcriptions.length
+            });
+            
+            return browserCacheData;
+            
+        } catch (error) {
+            console.error('Server export conversion error:', error);
+            return null;
+        }
+    }
+
+    parsePageXMLAnnotations(xmlContent, imageId) {
+        try {
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(xmlContent, 'text/xml');
+            const annotations = [];
+            
+            // Parse PageXML format - look for TextRegion elements
+            const textRegions = xmlDoc.querySelectorAll('TextRegion');
+            
+            textRegions.forEach((region, index) => {
+                const coords = region.querySelector('Coords');
+                const textEquiv = region.querySelector('TextEquiv Unicode');
+                
+                if (coords) {
+                    const points = coords.getAttribute('points');
+                    if (points) {
+                        // Parse coordinates
+                        const coordPairs = points.split(' ').map(pair => {
+                            const [x, y] = pair.split(',').map(Number);
+                            return { x, y };
+                        });
+                        
+                        if (coordPairs.length >= 4) {
+                                                         // Create annotation  
+                             const annotation = {
+                                 id: `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                                 image_id: imageId,
+                                 annotation_type: 'polygon',
+                                 type: 'polygon',
+                                 classification: region.getAttribute('type') || 'paragraph',
+                                 coordinates: {
+                                     points: coordPairs
+                                 },
+                                 reading_order: index,
+                                 label: '',
+                                 metadata: {},
+                                 created_at: new Date().toISOString(),
+                                 updated_at: new Date().toISOString()
+                             };
+                             
+
+                            
+                            annotations.push(annotation);
+                            
+                            // Add transcription if available
+                            if (textEquiv) {
+                                const transcription = {
+                                    id: `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                                    image: imageId,
+                                    annotation: annotation.id,
+                                    transcription_type: 'annotation',
+                                    api_endpoint: 'pagexml_import',
+                                    api_model: 'pagexml',
+                                    status: 'completed',
+                                    text_content: textEquiv.textContent || '',
+                                    confidence_score: null,
+                                    api_response_raw: null,
+                                    is_current: true,
+                                    created_at: new Date().toISOString(),
+                                    updated_at: new Date().toISOString()
+                                };
+                                
+                                // Add to transcriptions (will be added by caller)
+                                annotation._transcription = transcription;
+                            }
+                        }
+                    }
+                }
+            });
+            
+            return annotations;
+            
+        } catch (error) {
+            console.error('PageXML parsing error:', error);
+            return [];
+        }
+    }
+
+    async blobToBase64(blob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    exitBrowserCacheMode() {
+        if (confirm('Are you sure you want to exit Browser Cache Mode? Your local data will remain in your browser but you will return to the login screen.')) {
+            this.isBrowserCacheMode = false;
+            localStorage.removeItem('browserCacheMode');
+            this.currentUser = null;
+            this.showWelcomeScreen();
+            this.showAlert('Exited Browser Cache Mode. Your local data is still stored in your browser.', 'info');
+        }
+    }
+
+    async clearBrowserCache() {
+        if (!this.isBrowserCacheMode) {
+            this.showAlert('Clear cache is only available in Browser Cache Mode', 'warning');
+            return;
+        }
+        
+        if (confirm('Are you sure you want to clear all browser cache data? This cannot be undone.')) {
+            try {
+                // Close database connection
+                if (this.localStorage.db) {
+                    this.localStorage.db.close();
+                }
+                
+                // Delete the database
+                await new Promise((resolve, reject) => {
+                    const deleteRequest = indexedDB.deleteDatabase(this.localStorage.dbName);
+                    deleteRequest.onsuccess = () => resolve();
+                    deleteRequest.onerror = () => reject(deleteRequest.error);
+                });
+                
+                // Reset localStorage manager
+                this.localStorage.isInitialized = false;
+                this.localStorage.db = null;
+                
+                // Clear UI
+                this.clearProjectTree();
+                this.clearCanvas();
+                this.clearImageList();
+                
+                this.showAlert('Browser cache cleared successfully!', 'success');
+            } catch (error) {
+                console.error('Error clearing browser cache:', error);
+                this.showAlert('Failed to clear browser cache', 'danger');
+            }
+        }
+    }
+    
+    async debugBrowserCacheData() {
+        if (!this.isBrowserCacheMode) {
+            console.log('Not in browser cache mode');
+            return;
+        }
+        
+        try {
+            const projects = await this.localStorage.getAll('projects');
+            const documents = await this.localStorage.getAll('documents');
+            const images = await this.localStorage.getAll('images');
+            const annotations = await this.localStorage.getAll('annotations');
+            const transcriptions = await this.localStorage.getAll('transcriptions');
+            
+            console.log('=== BROWSER CACHE DEBUG ===');
+            console.log('Projects:', projects.length, projects);
+            console.log('Documents:', documents.length, documents);
+            console.log('Images:', images.length, images);
+            console.log('Annotations:', annotations.length, annotations);
+            console.log('Transcriptions:', transcriptions.length, transcriptions);
+            
+            // Check for current image annotations
+            if (this.currentImage) {
+                const imageAnnotations = await this.localStorage.getAll('annotations', 'image_id', this.currentImage.id);
+                console.log(`Annotations for current image (${this.currentImage.id}):`, imageAnnotations.length, imageAnnotations);
+            }
+        } catch (error) {
+            console.error('Debug error:', error);
+        }
+    }
+
+    clearProjectTree() {
+        const projectTree = document.getElementById('projectTree');
+        if (projectTree) {
+            projectTree.innerHTML = '<div class="text-center text-muted p-3">No projects available</div>';
+        }
+    }
+
+    clearCanvas() {
+        if (this.canvas) {
+            this.canvas.clear();
+        }
+        this.currentImage = null;
+        this.annotations = [];
+    }
+
+    clearImageList() {
+        const imageGrid = document.getElementById('imageGrid');
+        if (imageGrid) {
+            imageGrid.innerHTML = '<div class="text-center text-muted p-3">No images available</div>';
+        }
+    }
+
+    async startBrowserCacheMode() {
+        this.isBrowserCacheMode = true;
+        localStorage.setItem('browserCacheMode', 'true');
+        
+        try {
+            await this.localStorage.init();
+            await this.loadBrowserCacheSettings();
+            this.showAppInterface();
+            await this.loadProjects();
+            this.showAlert('Browser Cache Mode activated! All data will be stored locally in your browser.', 'success');
+        } catch (error) {
+            console.error('Failed to initialize browser cache mode:', error);
+            this.showAlert('Failed to initialize browser cache mode. Please check your browser compatibility.', 'danger');
+        }
+    }
+
+    async loadBrowserCacheSettings() {
+        // Load or create default user settings for browser cache mode
+        let customPrompts = await this.localStorage.getSetting('custom_prompts');
+        let customZones = await this.localStorage.getSetting('custom_zones'); 
+        let zoneColors = await this.localStorage.getSetting('zone_colors');
+        let enabledZoneTypes = await this.localStorage.getSetting('enabled_zone_types');
+        let enabledLineTypes = await this.localStorage.getSetting('enabled_line_types');
+
+        // Set defaults if not found
+        if (!customPrompts) {
+            customPrompts = [
+                {
+                    id: 'default_main',
+                    name: 'Main Zone Default',
+                    prompt: 'Transcribe this text accurately, preserving formatting and structure.',
+                    zones: ['MainZone'],
+                    metadata_fields: [
+                        { name: 'handwritten', type: 'boolean', default: false },
+                        { name: 'typed', type: 'boolean', default: true },
+                        { name: 'language', type: 'string', default: 'en' }
+                    ],
+                    is_default: true
+                }
+            ];
+            await this.localStorage.setSetting('custom_prompts', customPrompts);
+        }
+
+        if (!customZones) {
+            customZones = [];
+            await this.localStorage.setSetting('custom_zones', customZones);
+        }
+
+        if (!zoneColors) {
+            zoneColors = {};
+            await this.localStorage.setSetting('zone_colors', zoneColors);
+        }
+
+        if (!enabledZoneTypes) {
+            enabledZoneTypes = ['MainZone', 'GraphicZone', 'TableZone', 'DropCapitalZone', 'MusicZone', 'MarginTextZone', 'CustomZone'];
+            await this.localStorage.setSetting('enabled_zone_types', enabledZoneTypes);
+        }
+
+        if (!enabledLineTypes) {
+            enabledLineTypes = ['DefaultLine', 'HeadingLine', 'DropCapitalLine', 'InterlinearLine', 'CustomLine'];
+            await this.localStorage.setSetting('enabled_line_types', enabledLineTypes);
+        }
+
+        // Create a mock user object for browser cache mode
+        this.currentUser = {
+            user: { username: 'Browser User' },
+            custom_prompts: customPrompts,
+            custom_zones: customZones,
+            zone_colors: zoneColors,
+            enabled_zone_types: enabledZoneTypes,
+            enabled_line_types: enabledLineTypes,
+            custom_detection_mappings: await this.localStorage.getSetting('custom_detection_mappings') || {}
+        };
+
+        this.customPrompts = customPrompts;
+        this.customZones = customZones;
+        this.zoneColors = zoneColors;
+        
+        // Set user enabled types
+        this.userEnabledTypes = {
+            zones: enabledZoneTypes,
+            lines: enabledLineTypes
+        };
+
+        // Update UI
+        document.getElementById('username').textContent = this.currentUser.user.username;
+        this.initializeDefaultColors();
+        this.updateCredentialsStatus();
+        this.populatePromptsList();
+    }
+
+    // Override the init method to support browser cache mode
     async init() {
         this.setupEventListeners();
         
-        if (this.authToken) {
+        if (this.isBrowserCacheMode) {
+            try {
+                await this.loadBrowserCacheSettings();
+                await this.loadAnnotationTypes();
+                this.showAppInterface();
+                await this.loadProjects();
+            } catch (error) {
+                console.error('Failed to load browser cache mode:', error);
+                this.showWelcomeScreen();
+            }
+        } else if (this.authToken) {
             try {
                 await this.loadUserProfile();
                 await this.loadAnnotationTypes();
@@ -180,6 +1094,123 @@ async ensureMainZonePrompt() {
             }
         } else {
             this.showWelcomeScreen();
+        }
+    }
+
+    // Debug helper function to diagnose prompt/classification issues
+    debugPromptClassifications() {
+        console.group('🔍 Prompt & Classification Debug Info');
+        
+        // Show all available zone types
+        console.log('📝 Available Zone Types:');
+        if (this.annotationTypes) {
+            this.annotationTypes.all_types.zones.forEach(zone => {
+                console.log(`  • ${zone.label} (value: "${zone.value}")`);
+            });
+        }
+        
+        // Show custom zones
+        if (this.customZones.length > 0) {
+            console.log('🎨 Custom Zones:');
+            this.customZones.forEach(zone => {
+                console.log(`  • ${zone.label} (value: "${zone.value}")`);
+            });
+        }
+        
+        // Show current prompts and their zones
+        console.log('💬 Current Prompts:');
+        this.customPrompts.forEach(prompt => {
+            console.log(`  • "${prompt.name}": zones [${prompt.zones.join(', ')}]`);
+        });
+        
+        // Show current annotations and their classifications
+        if (this.annotations.length > 0) {
+            console.log('📍 Current Annotations:');
+            this.annotations.forEach((ann, i) => {
+                const prompt = this.getPromptForAnnotation(ann);
+                console.log(`  • Annotation ${i+1}: classification "${ann.classification}" → prompt "${prompt.name || 'default'}"`);
+            });
+        }
+        
+        // Show detection mappings
+        if (this.currentUser && this.currentUser.custom_detection_mappings) {
+            console.log('🔄 Detection Mappings:');
+            Object.entries(this.currentUser.custom_detection_mappings).forEach(([from, to]) => {
+                console.log(`  • "${from}" → "${to}"`);
+            });
+        }
+        
+        console.groupEnd();
+    }
+
+    // Helper function to ensure prompts include main zone types
+    async ensureMainZonePrompt() {
+        if (!this.annotationTypes || !this.customPrompts) return;
+        
+        // Find the main zone type value
+        const mainZoneType = this.annotationTypes.all_types.zones.find(z => 
+            z.label.toLowerCase().includes('main') || z.value.toLowerCase().includes('main')
+        );
+        
+        if (!mainZoneType) {
+            console.log('No main zone type found in annotation types');
+            return;
+        }
+        
+        // Check if any prompt includes the main zone
+        const hasMainZonePrompt = this.customPrompts.some(prompt => 
+            prompt.zones && prompt.zones.includes(mainZoneType.value)
+        );
+        
+        if (!hasMainZonePrompt) {
+            console.log(`Creating default prompt for Main Zone (${mainZoneType.value})`);
+            
+            // Create a default prompt for Main Zone
+            const mainZonePrompt = {
+                id: 'main_zone_default_' + Date.now(),
+                name: 'Main Zone Default',
+                prompt: 'Transcribe this text accurately, preserving formatting and structure.',
+                zones: [mainZoneType.value],
+                metadata_fields: [
+                    { name: 'handwritten', type: 'boolean', default: false },
+                    { name: 'typed', type: 'boolean', default: true },
+                    { name: 'language', type: 'string', default: 'en' }
+                ],
+                is_default: false
+            };
+            
+            const updatedPrompts = [...this.customPrompts, mainZonePrompt];
+            
+            try {
+                if (this.isBrowserCacheMode) {
+                    // Save to browser cache
+                    await this.localStorage.setSetting('custom_prompts', updatedPrompts);
+                    this.customPrompts = updatedPrompts;
+                    this.currentUser.custom_prompts = updatedPrompts;
+                } else {
+                    // Save to backend
+                    const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                        method: 'PATCH',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Token ${this.authToken}`
+                        },
+                        body: JSON.stringify({
+                            custom_prompts: updatedPrompts
+                        })
+                    });
+                    
+                    if (response.ok) {
+                        this.customPrompts = updatedPrompts;
+                    }
+                }
+                
+                this.populatePromptsList();
+                console.log('✅ Main Zone prompt created successfully');
+                this.showAlert('Main Zone prompt created automatically', 'info');
+            } catch (error) {
+                console.error('Error creating main zone prompt:', error);
+            }
         }
     }
 
@@ -302,26 +1333,82 @@ async ensureMainZonePrompt() {
 
     async loadAnnotationTypes() {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/annotation-types/`, {
-                headers: {
-                    'Authorization': `Token ${this.authToken}`
-                }
-            });
-
-            if (response.ok) {
-                const data = await response.json();
+            if (this.isBrowserCacheMode) {
+                // Load annotation types from static data for browser cache mode
+                const data = {
+                    all_types: {
+                        zones: [
+                            { value: 'MainZone', label: 'Main Zone' },
+                            { value: 'GraphicZone', label: 'Graphic Zone' },
+                            { value: 'TableZone', label: 'Table Zone' },
+                            { value: 'DropCapitalZone', label: 'Drop Capital Zone' },
+                            { value: 'MusicZone', label: 'Music Zone' },
+                            { value: 'MarginTextZone', label: 'Margin Text Zone' },
+                            { value: 'CustomZone', label: 'Custom Zone' },
+                            { value: 'DamageZone', label: 'Damage Zone' },
+                            { value: 'DigitizationArtefactZone', label: 'Digitization Artefact Zone' },
+                            { value: 'NumberingZone', label: 'Numbering Zone' },
+                            { value: 'QuireMarksZone', label: 'Quire Marks Zone' },
+                            { value: 'RunningTitleZone', label: 'Running Title Zone' },
+                            { value: 'SealZone', label: 'Seal Zone' },
+                            { value: 'StampZone', label: 'Stamp Zone' },
+                            { value: 'TitlePageZone', label: 'Title Page Zone' }
+                        ],
+                        lines: [
+                            { value: 'DefaultLine', label: 'Default Line' },
+                            { value: 'HeadingLine', label: 'Heading Line' },
+                            { value: 'DropCapitalLine', label: 'Drop Capital Line' },
+                            { value: 'InterlinearLine', label: 'Interlinear Line' },
+                            { value: 'CustomLine', label: 'Custom Line' },
+                            { value: 'MusicLine', label: 'Music Line' }
+                        ]
+                    },
+                    user_enabled: this.userEnabledTypes || {
+                        zones: ['MainZone', 'GraphicZone', 'TableZone', 'DropCapitalZone', 'MusicZone', 'MarginTextZone', 'CustomZone'],
+                        lines: ['DefaultLine', 'HeadingLine', 'DropCapitalLine', 'InterlinearLine', 'CustomLine']
+                    }
+                };
+                
                 this.annotationTypes = data;
                 this.userEnabledTypes = data.user_enabled;
                 this.initializeDefaultColors();
                 this.populateClassificationSelector();
                 this.populateAnnotationTypesChecklist();
                 
+                // Update tool UI in case bbox tool is already selected
+                if (this.currentTool === 'bbox') {
+                    const classificationSelector = document.getElementById('classificationSelector');
+                    if (classificationSelector) {
+                        classificationSelector.style.display = 'flex';
+                    }
+                }
+                
                 // Ensure main zone prompt exists after annotation types are loaded
                 if (this.currentUser) {
                     await this.ensureMainZonePrompt();
                 }
             } else {
-                console.error('Failed to load annotation types');
+                const response = await fetch(`${this.apiBaseUrl}/annotation-types/`, {
+                    headers: {
+                        'Authorization': `Token ${this.authToken}`
+                    }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    this.annotationTypes = data;
+                    this.userEnabledTypes = data.user_enabled;
+                    this.initializeDefaultColors();
+                    this.populateClassificationSelector();
+                    this.populateAnnotationTypesChecklist();
+                    
+                    // Ensure main zone prompt exists after annotation types are loaded
+                    if (this.currentUser) {
+                        await this.ensureMainZonePrompt();
+                    }
+                } else {
+                    console.error('Failed to load annotation types');
+                }
             }
         } catch (error) {
             console.error('Error loading annotation types:', error);
@@ -367,6 +1454,21 @@ async ensureMainZonePrompt() {
         document.getElementById('userMenu').style.display = 'block';
         document.getElementById('loginButton').style.display = 'none';
         
+        // Show/hide navigation items based on mode
+        if (this.isBrowserCacheMode) {
+            document.getElementById('serverExportsNav').style.display = 'none';
+            document.getElementById('serverImportsNav').style.display = 'none';
+            document.getElementById('browserCacheDataNav').style.display = 'block';
+            document.getElementById('browserCacheExitOption').style.display = 'block';
+            document.getElementById('logoutOption').style.display = 'none';
+        } else {
+            document.getElementById('serverExportsNav').style.display = 'block';
+            document.getElementById('serverImportsNav').style.display = 'block';
+            document.getElementById('browserCacheDataNav').style.display = 'none';
+            document.getElementById('browserCacheExitOption').style.display = 'none';
+            document.getElementById('logoutOption').style.display = 'block';
+        }
+        
         if (!this.canvas) {
             this.initCanvas();
         }
@@ -379,7 +1481,26 @@ async ensureMainZonePrompt() {
     }
 
     showLoading(show) {
-        document.getElementById('loadingSpinner').style.display = show ? 'flex' : 'none';
+        const spinner = document.getElementById('loadingSpinner');
+        if (spinner) {
+            spinner.style.display = show ? 'flex' : 'none';
+        }
+        
+        // Auto-clear loading after 10 seconds to prevent stuck loading states
+        if (show) {
+            if (this.loadingTimeout) {
+                clearTimeout(this.loadingTimeout);
+            }
+            this.loadingTimeout = setTimeout(() => {
+                console.warn('Loading spinner auto-cleared after timeout');
+                this.showLoading(false);
+            }, 10000);
+        } else {
+            if (this.loadingTimeout) {
+                clearTimeout(this.loadingTimeout);
+                this.loadingTimeout = null;
+            }
+        }
     }
 
     showAlert(message, type = 'info') {
@@ -527,6 +1648,10 @@ async ensureMainZonePrompt() {
         const classificationSelector = document.getElementById('classificationSelector');
         if (tool === 'bbox' && this.annotationTypes) {
             classificationSelector.style.display = 'flex';
+            // Make sure the selector is populated
+            if (!classificationSelector.querySelector('select').children.length > 1) {
+                this.populateClassificationSelector();
+            }
         } else {
             classificationSelector.style.display = 'none';
         }
@@ -798,28 +1923,49 @@ async ensureMainZonePrompt() {
         });
 
         try {
-            // Save to backend
-            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify({
-                    enabled_zone_types: selectedZones,
-                    enabled_line_types: selectedLines,
-                    custom_zones: this.customZones,
-                    zone_colors: this.zoneColors
-                })
-            });
-
-            if (response.ok) {
+            if (this.isBrowserCacheMode) {
+                // Save to browser cache
+                await this.localStorage.setSetting('enabled_zone_types', selectedZones);
+                await this.localStorage.setSetting('enabled_line_types', selectedLines);
+                await this.localStorage.setSetting('custom_zones', this.customZones);
+                await this.localStorage.setSetting('zone_colors', this.zoneColors);
+                
                 // Update local state
                 this.userEnabledTypes.zones = selectedZones;
                 this.userEnabledTypes.lines = selectedLines;
                 
+                // Update current user object
+                this.currentUser.enabled_zone_types = selectedZones;
+                this.currentUser.enabled_line_types = selectedLines;
+                this.currentUser.custom_zones = this.customZones;
+                this.currentUser.zone_colors = this.zoneColors;
+                
                 // Refresh UI components
                 this.populateClassificationSelector();
+            } else {
+                // Save to backend
+                const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({
+                        enabled_zone_types: selectedZones,
+                        enabled_line_types: selectedLines,
+                        custom_zones: this.customZones,
+                        zone_colors: this.zoneColors
+                    })
+                });
+
+                if (response.ok) {
+                    // Update local state
+                    this.userEnabledTypes.zones = selectedZones;
+                    this.userEnabledTypes.lines = selectedLines;
+                    
+                    // Refresh UI components
+                    this.populateClassificationSelector();
+                }
             }
         } catch (error) {
             console.error('Error saving annotation type change:', error);
@@ -835,18 +1981,23 @@ async ensureMainZonePrompt() {
         // Update colors in right sidebar
         this.updateCombinedTranscription();
         
-        // Save to backend
+        // Save to backend or browser cache
         try {
-            await fetch(`${this.apiBaseUrl}/auth/profile/`, {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify({
-                    zone_colors: this.zoneColors
-                })
-            });
+            if (this.isBrowserCacheMode) {
+                await this.localStorage.setSetting('zone_colors', this.zoneColors);
+                this.currentUser.zone_colors = this.zoneColors;
+            } else {
+                await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({
+                        zone_colors: this.zoneColors
+                    })
+                });
+            }
         } catch (error) {
             console.error('Error saving zone color:', error);
         }
@@ -1004,22 +2155,19 @@ async ensureMainZonePrompt() {
         this.userEnabledTypes.zones.push(zoneValue);
         
         try {
-            // Save to backend
-            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify({
-                    custom_zones: this.customZones,
-                    zone_colors: this.zoneColors,
-                    enabled_zone_types: this.userEnabledTypes.zones,
-                    enabled_line_types: this.userEnabledTypes.lines
-                })
-            });
-
-            if (response.ok) {
+            if (this.isBrowserCacheMode) {
+                // Save to browser cache
+                await this.localStorage.setSetting('custom_zones', this.customZones);
+                await this.localStorage.setSetting('zone_colors', this.zoneColors);
+                await this.localStorage.setSetting('enabled_zone_types', this.userEnabledTypes.zones);
+                await this.localStorage.setSetting('enabled_line_types', this.userEnabledTypes.lines);
+                
+                // Update current user object
+                this.currentUser.custom_zones = this.customZones;
+                this.currentUser.zone_colors = this.zoneColors;
+                this.currentUser.enabled_zone_types = this.userEnabledTypes.zones;
+                this.currentUser.enabled_line_types = this.userEnabledTypes.lines;
+                
                 // Refresh UI
                 this.populateAnnotationTypesChecklist();
                 this.populateClassificationSelector();
@@ -1030,7 +2178,34 @@ async ensureMainZonePrompt() {
                 
                 this.showAlert('Custom zone added successfully!', 'success');
             } else {
-                throw new Error('Failed to save custom zone');
+                // Save to backend
+                const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({
+                        custom_zones: this.customZones,
+                        zone_colors: this.zoneColors,
+                        enabled_zone_types: this.userEnabledTypes.zones,
+                        enabled_line_types: this.userEnabledTypes.lines
+                    })
+                });
+
+                if (response.ok) {
+                    // Refresh UI
+                    this.populateAnnotationTypesChecklist();
+                    this.populateClassificationSelector();
+                    
+                    // Hide modal
+                    const modal = bootstrap.Modal.getInstance(document.getElementById('addCustomZoneModal'));
+                    modal.hide();
+                    
+                    this.showAlert('Custom zone added successfully!', 'success');
+                } else {
+                    throw new Error('Failed to save custom zone');
+                }
             }
         } catch (error) {
             console.error('Error adding custom zone:', error);
@@ -1053,22 +2228,19 @@ async ensureMainZonePrompt() {
         delete this.zoneColors[zoneValue];
         
         try {
-            // Save to backend
-            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify({
-                    custom_zones: this.customZones,
-                    zone_colors: this.zoneColors,
-                    enabled_zone_types: this.userEnabledTypes.zones,
-                    enabled_line_types: this.userEnabledTypes.lines
-                })
-            });
-
-            if (response.ok) {
+            if (this.isBrowserCacheMode) {
+                // Save to browser cache
+                await this.localStorage.setSetting('custom_zones', this.customZones);
+                await this.localStorage.setSetting('zone_colors', this.zoneColors);
+                await this.localStorage.setSetting('enabled_zone_types', this.userEnabledTypes.zones);
+                await this.localStorage.setSetting('enabled_line_types', this.userEnabledTypes.lines);
+                
+                // Update current user object
+                this.currentUser.custom_zones = this.customZones;
+                this.currentUser.zone_colors = this.zoneColors;
+                this.currentUser.enabled_zone_types = this.userEnabledTypes.zones;
+                this.currentUser.enabled_line_types = this.userEnabledTypes.lines;
+                
                 // Refresh UI
                 this.populateAnnotationTypesChecklist();
                 this.populateClassificationSelector();
@@ -1076,7 +2248,31 @@ async ensureMainZonePrompt() {
                 
                 this.showAlert('Custom zone removed successfully!', 'success');
             } else {
-                throw new Error('Failed to remove custom zone');
+                // Save to backend
+                const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({
+                        custom_zones: this.customZones,
+                        zone_colors: this.zoneColors,
+                        enabled_zone_types: this.userEnabledTypes.zones,
+                        enabled_line_types: this.userEnabledTypes.lines
+                    })
+                });
+
+                if (response.ok) {
+                    // Refresh UI
+                    this.populateAnnotationTypesChecklist();
+                    this.populateClassificationSelector();
+                    this.updateCombinedTranscription();
+                    
+                    this.showAlert('Custom zone removed successfully!', 'success');
+                } else {
+                    throw new Error('Failed to remove custom zone');
+                }
             }
         } catch (error) {
             console.error('Error removing custom zone:', error);
@@ -1224,7 +2420,7 @@ async ensureMainZonePrompt() {
         fabricObject.annotationId = tempId;
         this.updateAnnotationsList();
 
-        // Save to database
+        // Save to database or local storage
         try {
             if (!this.currentImage) {
                 console.error('No current image selected');
@@ -1232,25 +2428,18 @@ async ensureMainZonePrompt() {
             }
 
             const annotationData = {
-                image: this.currentImage.id,
+                image_id: this.currentImage.id,
                 annotation_type: type,
                 coordinates: coordinates,
                 classification: this.currentClassification || null,
                 label: '',
-                reading_order: readingOrder
+                reading_order: readingOrder,
+                metadata: {}
             };
 
-            const response = await fetch(`${this.apiBaseUrl}/annotations/`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify(annotationData)
-            });
-
-            if (response.ok) {
-                const savedAnnotation = await response.json();
+            if (this.isBrowserCacheMode) {
+                // Save to browser cache
+                const savedAnnotation = await this.localStorage.add('annotations', annotationData);
                 
                 // Update local annotation with real ID and reading order
                 const annotationIndex = this.annotations.findIndex(a => a.id === tempId);
@@ -1266,8 +2455,39 @@ async ensureMainZonePrompt() {
                 
                 console.log('Annotation saved successfully:', savedAnnotation.id);
             } else {
-                console.error('Failed to save annotation:', await response.text());
-                this.showAlert('Failed to save annotation', 'warning');
+                // Use server API
+                annotationData.image = this.currentImage.id; // Server expects 'image' not 'image_id'
+                delete annotationData.image_id;
+
+                const response = await fetch(`${this.apiBaseUrl}/annotations/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify(annotationData)
+                });
+
+                if (response.ok) {
+                    const savedAnnotation = await response.json();
+                    
+                    // Update local annotation with real ID and reading order
+                    const annotationIndex = this.annotations.findIndex(a => a.id === tempId);
+                    if (annotationIndex !== -1) {
+                        this.annotations[annotationIndex].id = savedAnnotation.id;
+                        this.annotations[annotationIndex].reading_order = savedAnnotation.reading_order;
+                        this.annotations[annotationIndex].classification = savedAnnotation.classification;
+                        fabricObject.annotationId = savedAnnotation.id;
+                        
+                        // Update the annotation list to reflect the new annotation
+                        this.updateAnnotationsList();
+                    }
+                    
+                    console.log('Annotation saved successfully:', savedAnnotation.id);
+                } else {
+                    console.error('Failed to save annotation:', await response.text());
+                    this.showAlert('Failed to save annotation', 'warning');
+                }
             }
         } catch (error) {
             console.error('Error saving annotation:', error);
@@ -1429,19 +2649,29 @@ async ensureMainZonePrompt() {
             // Update local annotation
             annotation.coordinates = newCoordinates;
 
-            // Save to backend
-            const response = await fetch(`${this.apiBaseUrl}/annotations/${annotation.id}/`, {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify({ coordinates: newCoordinates })
-            });
+            // Save to backend or browser cache
+            if (this.isBrowserCacheMode) {
+                // Update annotation in browser cache
+                const storedAnnotation = await this.localStorage.get('annotations', annotation.id);
+                if (storedAnnotation) {
+                    storedAnnotation.coordinates = newCoordinates;
+                    storedAnnotation.updated_at = new Date().toISOString();
+                    await this.localStorage.update('annotations', storedAnnotation);
+                }
+            } else {
+                const response = await fetch(`${this.apiBaseUrl}/annotations/${annotation.id}/`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({ coordinates: newCoordinates })
+                });
 
-            if (!response.ok) {
-                console.error('Failed to update annotation coordinates');
-                this.showAlert('Failed to save annotation changes', 'warning');
+                if (!response.ok) {
+                    console.error('Failed to update annotation coordinates');
+                    this.showAlert('Failed to save annotation changes', 'warning');
+                }
             }
         } catch (error) {
             console.error('Error updating annotation coordinates:', error);
@@ -1452,21 +2682,47 @@ async ensureMainZonePrompt() {
     // Project Management
     async loadProjects() {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/projects/`, {
-                headers: {
-                    'Authorization': `Token ${this.authToken}`
-                }
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                this.renderProjectTree(data.results);
+            // Double-check browser cache mode status
+            const storedMode = localStorage.getItem('browserCacheMode') === 'true';
+            if (this.isBrowserCacheMode !== storedMode) {
+                console.warn('Browser cache mode mismatch detected, correcting...');
+                this.isBrowserCacheMode = storedMode;
+            }
+            
+            if (this.isBrowserCacheMode) {
+                const projects = await this.localStorage.getAll('projects');
+                // Sort by order
+                projects.sort((a, b) => (a.order || 0) - (b.order || 0));
+                this.renderProjectTree(projects);
             } else {
-                this.showAlert('Failed to load projects', 'danger');
+                // Only make server calls if we have proper authentication
+                if (!this.authToken) {
+                    console.warn('No auth token available for server API call');
+                    this.showAlert('Please sign in to access server data', 'warning');
+                    return;
+                }
+                
+                const response = await fetch(`${this.apiBaseUrl}/projects/`, {
+                    headers: {
+                        'Authorization': `Token ${this.authToken}`
+                    }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    this.renderProjectTree(data.results);
+                } else {
+                    this.showAlert('Failed to load projects', 'danger');
+                }
             }
         } catch (error) {
             console.error('Error loading projects:', error);
             this.showAlert('Failed to load projects', 'danger');
+            // Ensure we show an empty state instead of leaving loading spinner
+            const treeContainer = document.getElementById('projectTree');
+            if (treeContainer) {
+                treeContainer.innerHTML = '<div class="p-3 text-muted">Failed to load projects. Please try refreshing.</div>';
+            }
         }
     }
 
@@ -1557,7 +2813,7 @@ async ensureMainZonePrompt() {
                         </div>
                     </div>
                     <button class="btn btn-sm btn-outline-primary" onclick="event.stopPropagation(); app.showCreateDocumentModal('${project.id}')" title="Add Document">
-                        <i class="fas fa-file-plus"></i>
+                        <i class="fas fa-plus"></i>
                     </button>
                     <button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); app.deleteProject('${project.id}')" title="Delete Project">
                         <i class="fas fa-trash"></i>
@@ -1606,15 +2862,20 @@ async ensureMainZonePrompt() {
 
     async loadProjectDocuments(projectId, container) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/documents/?project=${projectId}`, {
-                headers: {
-                    'Authorization': `Token ${this.authToken}`
-                }
-            });
+            if (this.isBrowserCacheMode) {
+                const documents = await this.localStorage.getAll('documents', 'project_id', projectId);
+                this.renderDocuments(documents, container);
+            } else {
+                const response = await fetch(`${this.apiBaseUrl}/documents/?project=${projectId}`, {
+                    headers: {
+                        'Authorization': `Token ${this.authToken}`
+                    }
+                });
 
-            if (response.ok) {
-                const data = await response.json();
-                this.renderDocuments(data.results, container);
+                if (response.ok) {
+                    const data = await response.json();
+                    this.renderDocuments(data.results, container);
+                }
             }
         } catch (error) {
             console.error('Error loading documents:', error);
@@ -1758,16 +3019,27 @@ async ensureMainZonePrompt() {
 
     async loadDocumentImages(documentId, container) {
         try {
-            // Add cache-busting parameter to ensure fresh data
-            const response = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}&_t=${Date.now()}`, {
-                headers: {
-                    'Authorization': `Token ${this.authToken}`
-                }
-            });
+            if (this.isBrowserCacheMode) {
+                const images = await this.localStorage.getAll('images', 'document_id', documentId);
+                // Sort by order
+                images.sort((a, b) => (a.order || 0) - (b.order || 0));
+                // Add document_id for compatibility
+                images.forEach(img => {
+                    if (!img.document_id) img.document_id = documentId;
+                });
+                this.renderImages(images, container);
+            } else {
+                // Add cache-busting parameter to ensure fresh data
+                const response = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}&_t=${Date.now()}`, {
+                    headers: {
+                        'Authorization': `Token ${this.authToken}`
+                    }
+                });
 
-            if (response.ok) {
-                const data = await response.json();
-                this.renderImages(data.results, container);
+                if (response.ok) {
+                    const data = await response.json();
+                    this.renderImages(data.results, container);
+                }
             }
         } catch (error) {
             console.error('Error loading images:', error);
@@ -1877,22 +3149,51 @@ async ensureMainZonePrompt() {
                 requestData.custom_endpoint_auth = credentials.custom_endpoint_auth;
             }
 
-            const response = await fetch(`${this.apiBaseUrl}/images/${this.currentImage.id}/transcribe/`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify(requestData)
-            });
-
-            if (response.ok) {
-                const transcription = await response.json();
-                this.updateTranscriptionDisplay(transcription);
-                this.showAlert('Transcription completed!', 'success');
+            if (this.isBrowserCacheMode) {
+                // Handle full image transcription locally for browser cache mode
+                const transcription = await this.performLocalImageTranscription(requestData);
+                if (transcription) {
+                    // Store transcription in local storage
+                    const transcriptionData = {
+                        id: `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                        image: this.currentImage.id,
+                        annotation: null,
+                        transcription_type: 'full_image',
+                        api_endpoint: selectedModel.provider,
+                        api_model: selectedModel.model,
+                        status: 'completed',
+                        text_content: transcription.text_content,
+                        confidence_score: transcription.confidence_score || null,
+                        api_response_raw: transcription.api_response_raw || null,
+                        is_current: true,
+                        created_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString()
+                    };
+                    
+                    await this.localStorage.add('transcriptions', transcriptionData);
+                    this.updateTranscriptionDisplay(transcription);
+                    // Refresh transcription list
+                    await this.loadImageTranscriptions();
+                    this.showAlert('Transcription completed!', 'success');
+                }
             } else {
-                const error = await response.json();
-                this.showAlert(error.error || 'Transcription failed', 'danger');
+                const response = await fetch(`${this.apiBaseUrl}/images/${this.currentImage.id}/transcribe/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify(requestData)
+                });
+
+                if (response.ok) {
+                    const transcription = await response.json();
+                    this.updateTranscriptionDisplay(transcription);
+                    this.showAlert('Transcription completed!', 'success');
+                } else {
+                    const error = await response.json();
+                    this.showAlert(error.error || 'Transcription failed', 'danger');
+                }
             }
         } catch (error) {
             console.error('Transcription error:', error);
@@ -1978,21 +3279,282 @@ async ensureMainZonePrompt() {
                 requestData.custom_endpoint_auth = credentials.custom_endpoint_auth;
             }
 
-            const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/transcribe/`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify(requestData)
-            });
+            if (this.isBrowserCacheMode) {
+                // Handle transcription locally for browser cache mode
+                const transcription = await this.performLocalTranscription(annotation, requestData);
+                if (transcription) {
+                    // Store transcription in local storage
+                    const transcriptionData = {
+                        id: `local_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                        image: this.currentImage.id,
+                        annotation: annotationId,
+                        transcription_type: 'annotation',
+                        api_endpoint: selectedModel.provider,
+                        api_model: selectedModel.model,
+                        status: 'completed',
+                        text_content: transcription.text_content,
+                        confidence_score: transcription.confidence_score || null,
+                        api_response_raw: transcription.api_response_raw || null,
+                        is_current: true,
+                        created_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString()
+                    };
+                    
+                    await this.localStorage.add('transcriptions', transcriptionData);
+                    this.updateAnnotationTranscription(annotationId, transcription);
+                    // Refresh transcription list
+                    await this.loadImageTranscriptions();
+                }
+            } else {
+                const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/transcribe/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify(requestData)
+                });
 
-            if (response.ok) {
-                const transcription = await response.json();
-                this.updateAnnotationTranscription(annotationId, transcription);
+                if (response.ok) {
+                    const transcription = await response.json();
+                    this.updateAnnotationTranscription(annotationId, transcription);
+                }
             }
         } catch (error) {
             console.error('Annotation transcription error:', error);
+        }
+    }
+
+    async performLocalTranscription(annotation, requestData) {
+        try {
+            // Get the image region for the annotation
+            const imageCanvas = await this.getAnnotationImageData(annotation);
+            
+            if (requestData.api_endpoint === 'openai') {
+                return await this.transcribeWithOpenAI(imageCanvas, requestData);
+            } else if (requestData.api_endpoint === 'vertex') {
+                return await this.transcribeWithVertexAI(imageCanvas, requestData);
+            } else if (requestData.api_endpoint === 'custom') {
+                return await this.transcribeWithCustomEndpoint(imageCanvas, requestData);
+            }
+            
+            throw new Error('Unsupported API endpoint');
+        } catch (error) {
+            console.error('Local transcription error:', error);
+            this.showAlert(`Transcription failed: ${error.message}`, 'danger');
+            return null;
+        }
+    }
+
+    async getAnnotationImageData(annotation) {
+        // Create a canvas to extract the annotation region from the current image
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Get the current image element
+        const imgElement = new Image();
+        imgElement.src = this.currentImage.image_file;
+        
+        return new Promise((resolve, reject) => {
+            imgElement.onload = () => {
+                const coords = annotation.coordinates;
+                
+                if (annotation.type === 'bbox') {
+                    canvas.width = coords.width;
+                    canvas.height = coords.height;
+                    
+                    // Draw the cropped region
+                    ctx.drawImage(
+                        imgElement,
+                        coords.x, coords.y, coords.width, coords.height,
+                        0, 0, coords.width, coords.height
+                    );
+                } else if (annotation.type === 'polygon') {
+                    // For polygons, find bounding box
+                    const xs = coords.points.map(p => p.x);
+                    const ys = coords.points.map(p => p.y);
+                    const minX = Math.min(...xs);
+                    const minY = Math.min(...ys);
+                    const maxX = Math.max(...xs);
+                    const maxY = Math.max(...ys);
+                    
+                    canvas.width = maxX - minX;
+                    canvas.height = maxY - minY;
+                    
+                    // Draw the bounding box region (for simplicity)
+                    ctx.drawImage(
+                        imgElement,
+                        minX, minY, maxX - minX, maxY - minY,
+                        0, 0, maxX - minX, maxY - minY
+                    );
+                }
+                
+                resolve(canvas.toDataURL('image/png'));
+            };
+            
+            imgElement.onerror = reject;
+        });
+    }
+
+    async transcribeWithOpenAI(imageDataUrl, requestData) {
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${requestData.openai_api_key}`
+            },
+            body: JSON.stringify({
+                model: requestData.api_model,
+                messages: [
+                    {
+                        role: 'user',
+                        content: [
+                            {
+                                type: 'text',
+                                text: requestData.custom_prompt
+                            },
+                            {
+                                type: 'image_url',
+                                image_url: {
+                                    url: imageDataUrl
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens: 1000
+            })
+        });
+
+        if (!response.ok) {
+            let errorMessage = 'OpenAI API request failed';
+            try {
+                const error = await response.json();
+                errorMessage = error.error?.message || errorMessage;
+            } catch (e) {
+                errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+            }
+            throw new Error(errorMessage);
+        }
+
+        const data = await response.json();
+        
+        // Validate response structure
+        if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+            throw new Error('Invalid response format from OpenAI');
+        }
+        
+        return {
+            text_content: data.choices[0].message.content,
+            api_response_raw: data,
+            confidence_score: null
+        };
+    }
+
+    async transcribeWithVertexAI(imageDataUrl, requestData) {
+        // Remove data URL prefix to get base64
+        const base64Image = imageDataUrl.split(',')[1];
+        
+        // Clean up the model name - remove 'google/' prefix if present
+        const modelName = requestData.vertex_model.replace('google/', '');
+        
+        const response = await fetch(`https://${requestData.vertex_location}-aiplatform.googleapis.com/v1/projects/${requestData.vertex_project_id}/locations/${requestData.vertex_location}/publishers/google/models/${modelName}:generateContent`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${requestData.vertex_access_token}`
+            },
+            body: JSON.stringify({
+                contents: [{
+                    role: 'user',
+                    parts: [
+                        { text: requestData.custom_prompt },
+                        {
+                            inline_data: {
+                                mime_type: 'image/png',
+                                data: base64Image
+                            }
+                        }
+                    ]
+                }]
+            })
+        });
+
+        if (!response.ok) {
+            let errorMessage = 'Vertex AI API request failed';
+            try {
+                const error = await response.json();
+                errorMessage = error.error?.message || errorMessage;
+            } catch (e) {
+                errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+            }
+            throw new Error(errorMessage);
+        }
+
+        const data = await response.json();
+        
+        // Validate response structure
+        if (!data.candidates || !data.candidates[0] || !data.candidates[0].content || !data.candidates[0].content.parts) {
+            throw new Error('Invalid response format from Vertex AI');
+        }
+        
+        return {
+            text_content: data.candidates[0].content.parts[0].text,
+            api_response_raw: data,
+            confidence_score: null
+        };
+    }
+
+    async transcribeWithCustomEndpoint(imageDataUrl, requestData) {
+        // Convert to blob for custom endpoint
+        const response = await fetch(imageDataUrl);
+        const blob = await response.blob();
+        
+        const formData = new FormData();
+        formData.append('image', blob, 'annotation.png');
+        formData.append('prompt', requestData.custom_prompt);
+
+        const apiResponse = await fetch(requestData.custom_endpoint_url, {
+            method: 'POST',
+            headers: {
+                'Authorization': requestData.custom_endpoint_auth
+            },
+            body: formData
+        });
+
+        if (!apiResponse.ok) {
+            throw new Error('Custom endpoint request failed');
+        }
+
+        const data = await apiResponse.json();
+        return {
+            text_content: data.text || data.transcription || JSON.stringify(data),
+            api_response_raw: data,
+            confidence_score: data.confidence || null
+        };
+    }
+
+    async performLocalImageTranscription(requestData) {
+        try {
+            // Use the full image for transcription
+            const imageDataUrl = this.currentImage.image_file;
+            
+            if (requestData.api_endpoint === 'openai') {
+                requestData.custom_prompt = requestData.custom_prompt || 'Transcribe all the text in this image accurately, preserving formatting and structure.';
+                return await this.transcribeWithOpenAI(imageDataUrl, requestData);
+            } else if (requestData.api_endpoint === 'vertex') {
+                requestData.custom_prompt = requestData.custom_prompt || 'Transcribe all the text in this image accurately, preserving formatting and structure.';
+                return await this.transcribeWithVertexAI(imageDataUrl, requestData);
+            } else if (requestData.api_endpoint === 'custom') {
+                requestData.custom_prompt = requestData.custom_prompt || 'Transcribe all the text in this image accurately, preserving formatting and structure.';
+                return await this.transcribeWithCustomEndpoint(imageDataUrl, requestData);
+            }
+            
+            throw new Error('Unsupported API endpoint');
+        } catch (error) {
+            console.error('Local image transcription error:', error);
+            this.showAlert(`Transcription failed: ${error.message}`, 'danger');
+            return null;
         }
     }
 
@@ -2082,25 +3644,47 @@ async ensureMainZonePrompt() {
 
     async updateAnnotationMetadata(annotationId, metadata) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify({ metadata: metadata })
-            });
-
-            if (response.ok) {
-                // Update local annotation
-                const annotation = this.annotations.find(a => a.id === annotationId);
+    
+            
+            if (this.isBrowserCacheMode) {
+                // Update annotation metadata in browser cache
+                const annotation = await this.localStorage.get('annotations', annotationId);
                 if (annotation) {
                     annotation.metadata = { ...annotation.metadata, ...metadata };
+                    annotation.updated_at = new Date().toISOString();
+                    await this.localStorage.update('annotations', annotation);
+                    
+                    // Update local annotation in memory
+                    const localAnnotation = this.annotations.find(a => a.id === annotationId);
+                    if (localAnnotation) {
+                        localAnnotation.metadata = { ...localAnnotation.metadata, ...metadata };
+                    }
+                    
+
                 }
-                
-                // Update UI to show new metadata
-                this.updateCombinedTranscription();
+            } else {
+                const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({ metadata: metadata })
+                });
+
+                if (response.ok) {
+                    // Update local annotation
+                    const annotation = this.annotations.find(a => a.id === annotationId);
+                    if (annotation) {
+                        annotation.metadata = { ...annotation.metadata, ...metadata };
+                    }
+                    
+
+                }
             }
+            
+            // Update UI to show new metadata
+            this.updateCombinedTranscription();
         } catch (error) {
             console.error('Error updating annotation metadata:', error);
         }
@@ -4845,42 +6429,71 @@ async ensureMainZonePrompt() {
         dropdown.addEventListener('change', async () => {
             const newClassification = dropdown.value || null;
             await this.updateAnnotationClassification(annotationId, newClassification);
-            document.body.removeChild(dropdown);
+            this.safeRemoveDropdown(dropdown);
         });
         
         // Handle click away
         dropdown.addEventListener('blur', () => {
-            if (document.body.contains(dropdown)) {
-                document.body.removeChild(dropdown);
-            }
+            this.safeRemoveDropdown(dropdown);
         });
+    }
+
+    safeRemoveDropdown(dropdown) {
+        try {
+            if (dropdown && dropdown.parentNode) {
+                dropdown.parentNode.removeChild(dropdown);
+            }
+        } catch (error) {
+            // Dropdown already removed, ignore
+        }
     }
     
     async updateAnnotationClassification(annotationId, newClassification) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify({
-                    classification: newClassification
-                })
-            });
-
-            if (response.ok) {
-                // Update local annotation
-                const annotation = this.annotations.find(a => a.id === annotationId);
+            console.log('updateAnnotationClassification - Browser Cache Mode:', this.isBrowserCacheMode, 'Annotation ID:', annotationId);
+            if (this.isBrowserCacheMode) {
+                // Update annotation in browser cache
+                const annotation = await this.localStorage.get('annotations', annotationId);
                 if (annotation) {
                     annotation.classification = newClassification;
+                    annotation.updated_at = new Date().toISOString();
+                    await this.localStorage.update('annotations', annotation);
+                    
+                    // Update local annotation in memory
+                    const localAnnotation = this.annotations.find(a => a.id === annotationId);
+                    if (localAnnotation) {
+                        localAnnotation.classification = newClassification;
+                    }
+                    
+                    // Update UI
+                    this.updateCombinedTranscription();
+                    this.showAlert('Classification updated successfully!', 'success');
                 }
-                
-                // Update UI
-                this.updateCombinedTranscription();
-                this.showAlert('Classification updated successfully!', 'success');
             } else {
-                throw new Error('Failed to update classification');
+                const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({
+                        classification: newClassification
+                    })
+                });
+
+                if (response.ok) {
+                    // Update local annotation
+                    const annotation = this.annotations.find(a => a.id === annotationId);
+                    if (annotation) {
+                        annotation.classification = newClassification;
+                    }
+                    
+                    // Update UI
+                    this.updateCombinedTranscription();
+                    this.showAlert('Classification updated successfully!', 'success');
+                } else {
+                    throw new Error('Failed to update classification');
+                }
             }
         } catch (error) {
             console.error('Error updating classification:', error);
@@ -6103,8 +7716,6 @@ async ensureMainZonePrompt() {
         };
 
         try {
-            this.showLoading(true);
-
             let updatedPrompts;
             if (this.currentEditingPrompt) {
                 // Update existing prompt
@@ -6118,32 +7729,49 @@ async ensureMainZonePrompt() {
                 updatedPrompts = [...this.customPrompts, promptData];
             }
 
-            // Save to backend
-            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify({
-                    custom_prompts: updatedPrompts
-                })
-            });
-
-            if (response.ok) {
+            if (this.isBrowserCacheMode) {
+                // Save to browser cache (no loading spinner needed for instant local operations)
+                await this.localStorage.setSetting('custom_prompts', updatedPrompts);
+                
                 this.customPrompts = updatedPrompts;
                 this.populatePromptsList();
                 
                 bootstrap.Modal.getInstance(document.getElementById('promptModal')).hide();
                 this.showAlert('Prompt saved successfully!', 'success');
             } else {
-                throw new Error('Failed to save prompt');
+                // Server operations need loading spinner
+                this.showLoading(true);
+                
+                // Save to backend
+                const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({
+                        custom_prompts: updatedPrompts
+                    })
+                });
+
+                if (response.ok) {
+                    this.customPrompts = updatedPrompts;
+                    this.populatePromptsList();
+                    
+                    bootstrap.Modal.getInstance(document.getElementById('promptModal')).hide();
+                    this.showAlert('Prompt saved successfully!', 'success');
+                } else {
+                    throw new Error('Failed to save prompt');
+                }
             }
         } catch (error) {
             console.error('Error saving prompt:', error);
             this.showAlert('Failed to save prompt', 'danger');
         } finally {
-            this.showLoading(false);
+            // Only clear loading if we're in server mode (browser cache mode doesn't use loading spinner)
+            if (!this.isBrowserCacheMode) {
+                this.showLoading(false);
+            }
             this.currentEditingPrompt = null;
         }
     }
@@ -6155,33 +7783,46 @@ async ensureMainZonePrompt() {
         if (!confirm(`Are you sure you want to delete the prompt "${prompt.name}"?`)) return;
 
         try {
-            this.showLoading(true);
-
             const updatedPrompts = this.customPrompts.filter(p => p.id !== promptId);
 
-            const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify({
-                    custom_prompts: updatedPrompts
-                })
-            });
-
-            if (response.ok) {
+            if (this.isBrowserCacheMode) {
+                // Delete from browser cache (no loading spinner needed for instant local operations)
+                await this.localStorage.setSetting('custom_prompts', updatedPrompts);
+                
                 this.customPrompts = updatedPrompts;
                 this.populatePromptsList();
                 this.showAlert('Prompt deleted successfully!', 'success');
             } else {
-                throw new Error('Failed to delete prompt');
+                // Server operations need loading spinner
+                this.showLoading(true);
+                
+                const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({
+                        custom_prompts: updatedPrompts
+                    })
+                });
+
+                if (response.ok) {
+                    this.customPrompts = updatedPrompts;
+                    this.populatePromptsList();
+                    this.showAlert('Prompt deleted successfully!', 'success');
+                } else {
+                    throw new Error('Failed to delete prompt');
+                }
             }
         } catch (error) {
             console.error('Error deleting prompt:', error);
             this.showAlert('Failed to delete prompt', 'danger');
         } finally {
-            this.showLoading(false);
+            // Only clear loading if we're in server mode (browser cache mode doesn't use loading spinner)
+            if (!this.isBrowserCacheMode) {
+                this.showLoading(false);
+            }
         }
     }
 
@@ -6201,32 +7842,62 @@ async ensureMainZonePrompt() {
         }
 
         try {
-            this.showLoading(true);
-            
-            const response = await fetch(`${this.apiBaseUrl}/projects/`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify({ name, description })
-            });
-
-            if (response.ok) {
-                const project = await response.json();
+            if (this.isBrowserCacheMode) {
+                // Create project in browser cache (no loading spinner needed for instant local operations)
+                const existingProjects = await this.localStorage.getAll('projects');
+                const maxOrder = existingProjects.reduce((max, p) => Math.max(max, p.order || 0), 0);
+                
+                const projectData = {
+                    name,
+                    description: description || '',
+                    order: maxOrder + 1,
+                    is_public: false
+                };
+                
+                const project = await this.localStorage.add('projects', projectData);
                 bootstrap.Modal.getInstance(document.getElementById('createProjectModal')).hide();
                 document.getElementById('createProjectForm').reset();
-                await this.loadProjects();
+                
+                // Load projects with error handling
+                try {
+                    await this.loadProjects();
+                } catch (error) {
+                    console.error('Error loading projects after creation:', error);
+                    // Still show success message since project was created
+                }
+                
                 this.showAlert('Project created successfully!', 'success');
             } else {
-                const error = await response.json();
-                this.showAlert(error.error || 'Failed to create project', 'danger');
+                // Server operations need loading spinner
+                this.showLoading(true);
+                const response = await fetch(`${this.apiBaseUrl}/projects/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({ name, description })
+                });
+
+                if (response.ok) {
+                    const project = await response.json();
+                    bootstrap.Modal.getInstance(document.getElementById('createProjectModal')).hide();
+                    document.getElementById('createProjectForm').reset();
+                    await this.loadProjects();
+                    this.showAlert('Project created successfully!', 'success');
+                } else {
+                    const error = await response.json();
+                    this.showAlert(error.error || 'Failed to create project', 'danger');
+                }
             }
         } catch (error) {
             console.error('Create project error:', error);
             this.showAlert('Failed to create project', 'danger');
         } finally {
-            this.showLoading(false);
+            // Only clear loading if we're in server mode (browser cache mode doesn't use loading spinner)
+            if (!this.isBrowserCacheMode) {
+                this.showLoading(false);
+            }
         }
     }
 
@@ -6261,11 +7932,7 @@ async ensureMainZonePrompt() {
             return;
         }
 
-        console.log('Creating document in project:', this.selectedProjectId); // Debug log
-
         try {
-            this.showLoading(true);
-            
             const requestData = { 
                 name, 
                 description, 
@@ -6276,37 +7943,68 @@ async ensureMainZonePrompt() {
                 requestData.reading_order = readingOrder;
             }
 
-            const response = await fetch(`${this.apiBaseUrl}/documents/`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify(requestData)
-            });
-
-            if (response.ok) {
-                const newDocument = await response.json();
+            if (this.isBrowserCacheMode) {
+                // Create document in browser cache (no loading spinner needed for instant local operations)
+                const documentData = {
+                    name,
+                    description: description || '',
+                    project_id: this.selectedProjectId,
+                    reading_order: readingOrder || null,
+                    default_transcription_type: 'full_image'
+                };
+                
+                const newDocument = await this.localStorage.add('documents', documentData);
                 bootstrap.Modal.getInstance(document.getElementById('createDocumentModal')).hide();
                 document.getElementById('createDocumentForm').reset();
                 
-                // Refresh the project tree to show the new document
-                const projectContainer = document.querySelector(`[data-project-id="${this.selectedProjectId}"] .tree-children`);
-                if (projectContainer && projectContainer.style.display !== 'none') {
-                    projectContainer.innerHTML = ''; // Clear existing content
-                    await this.loadProjectDocuments(this.selectedProjectId, projectContainer);
+                // Load projects with error handling
+                try {
+                    await this.loadProjects();
+                } catch (error) {
+                    console.error('Error loading projects after document creation:', error);
+                    // Still show success message since document was created
                 }
                 
                 this.showAlert('Document created successfully!', 'success');
             } else {
-                const error = await response.json();
-                this.showAlert(error.error || 'Failed to create document', 'danger');
+                // Server operations need loading spinner
+                this.showLoading(true);
+                
+                const response = await fetch(`${this.apiBaseUrl}/documents/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify(requestData)
+                });
+
+                if (response.ok) {
+                    const newDocument = await response.json();
+                    bootstrap.Modal.getInstance(document.getElementById('createDocumentModal')).hide();
+                    document.getElementById('createDocumentForm').reset();
+                    
+                    // Refresh the project tree to show the new document
+                    const projectContainer = document.querySelector(`[data-project-id="${this.selectedProjectId}"] .tree-children`);
+                    if (projectContainer && projectContainer.style.display !== 'none') {
+                        projectContainer.innerHTML = ''; // Clear existing content
+                        await this.loadProjectDocuments(this.selectedProjectId, projectContainer);
+                    }
+                    
+                    this.showAlert('Document created successfully!', 'success');
+                } else {
+                    const error = await response.json();
+                    this.showAlert(error.error || 'Failed to create document', 'danger');
+                }
             }
         } catch (error) {
             console.error('Create document error:', error);
             this.showAlert('Failed to create document', 'danger');
         } finally {
-            this.showLoading(false);
+            // Only clear loading if we're in server mode (browser cache mode doesn't use loading spinner)
+            if (!this.isBrowserCacheMode) {
+                this.showLoading(false);
+            }
         }
     }
 
@@ -6350,45 +8048,83 @@ async ensureMainZonePrompt() {
         const files = Array.from(fileInput.files);
         let uploaded = 0;
 
-                 try {
-             for (let i = 0; i < files.length; i++) {
-                 const file = files[i];
-                 statusDiv.textContent = `Uploading ${file.name}...`;
-                 
-                 // Create FormData with image file and metadata
-                 const formData = new FormData();
-                 formData.append('image_file', file);
-                 formData.append('name', file.name.split('.')[0]); // Remove extension for name
-                 formData.append('document_id', this.selectedDocumentId);
-                 if (i !== undefined) {
-                     formData.append('order', i.toString());
-                 }
+                         try {
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                statusDiv.textContent = `Uploading ${file.name}...`;
+                
+                if (this.isBrowserCacheMode) {
+                    // Store image in browser cache
+                    const base64Data = await this.localStorage.fileToBase64(file);
+                    
+                    // Create image in a way that works with the existing logic
+                    const img = new Image();
+                    await new Promise((resolve) => {
+                        img.onload = async () => {
+                            const imageData = {
+                                name: file.name.split('.')[0],
+                                document_id: this.selectedDocumentId,
+                                original_filename: file.name,
+                                file_size: file.size,
+                                width: img.width,
+                                height: img.height,
+                                is_processed: true,
+                                order: i,
+                                image_file: base64Data, // Store as base64
+                                image_url: base64Data   // Use base64 as URL for display
+                            };
+                            
+                            const imageRecord = await this.localStorage.add('images', imageData);
+                            uploaded++;
+                            const progress = (uploaded / files.length) * 100;
+                            progressBar.style.width = `${progress}%`;
+                            
+                            // Auto-transcribe if requested
+                            if (autoTranscribe) {
+                                statusDiv.textContent = `Transcribing ${file.name}...`;
+                                // Note: Auto-transcribe in browser cache mode will be handled separately
+                            }
+                            
+                            resolve();
+                        };
+                        img.src = base64Data;
+                    });
+                } else {
+                    // Create FormData with image file and metadata
+                    const formData = new FormData();
+                    formData.append('image_file', file);
+                    formData.append('name', file.name.split('.')[0]); // Remove extension for name
+                    formData.append('document_id', this.selectedDocumentId);
+                    if (i !== undefined) {
+                        formData.append('order', i.toString());
+                    }
 
-                 const uploadResponse = await fetch(`${this.apiBaseUrl}/images/`, {
-                     method: 'POST',
-                     headers: {
-                         'Authorization': `Token ${this.authToken}`
-                     },
-                     body: formData
-                 });
+                    const uploadResponse = await fetch(`${this.apiBaseUrl}/images/`, {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Token ${this.authToken}`
+                        },
+                        body: formData
+                    });
 
-                 if (uploadResponse.ok) {
-                     const imageRecord = await uploadResponse.json();
-                     uploaded++;
-                     const progress = (uploaded / files.length) * 100;
-                     progressBar.style.width = `${progress}%`;
-                     
-                     // Auto-transcribe if requested
-                     if (autoTranscribe) {
-                         statusDiv.textContent = `Transcribing ${file.name}...`;
-                         await this.transcribeImageById(imageRecord.id);
-                     }
-                 } else {
-                     const error = await uploadResponse.json();
-                     console.error(`Failed to upload ${file.name}:`, error);
-                     this.showAlert(`Failed to upload ${file.name}: ${JSON.stringify(error)}`, 'danger');
-                 }
-             }
+                    if (uploadResponse.ok) {
+                        const imageRecord = await uploadResponse.json();
+                        uploaded++;
+                        const progress = (uploaded / files.length) * 100;
+                        progressBar.style.width = `${progress}%`;
+                        
+                        // Auto-transcribe if requested
+                        if (autoTranscribe) {
+                            statusDiv.textContent = `Transcribing ${file.name}...`;
+                            await this.transcribeImageById(imageRecord.id);
+                        }
+                    } else {
+                        const error = await uploadResponse.json();
+                        console.error(`Failed to upload ${file.name}:`, error);
+                        this.showAlert(`Failed to upload ${file.name}: ${JSON.stringify(error)}`, 'danger');
+                    }
+                }
+            }
 
             statusDiv.textContent = `Uploaded ${uploaded} of ${files.length} images`;
             
@@ -6421,26 +8157,42 @@ async ensureMainZonePrompt() {
             // Clear previous image data
             this.clearImageData();
 
-            // Load image details
-            const response = await fetch(`${this.apiBaseUrl}/images/${imageId}/`, {
-                headers: {
-                    'Authorization': `Token ${this.authToken}`
+            if (this.isBrowserCacheMode) {
+                // Load image from browser cache
+                this.currentImage = await this.localStorage.get('images', imageId);
+                if (this.currentImage) {
+                    this.clearImageData();
+                    await this.loadImageInCanvas();
+                    // Transcriptions now loaded inside loadImageInCanvas after annotations
+                    
+                    // Refresh annotation positions after image and transform are set
+                    this.refreshAnnotationPositions();
+                    
+                    // Show image viewer
+                    document.getElementById('defaultView').style.display = 'none';
+                    document.getElementById('imageViewer').style.display = 'block';
                 }
-            });
+            } else {
+                // Load image details from server
+                const response = await fetch(`${this.apiBaseUrl}/images/${imageId}/`, {
+                    headers: {
+                        'Authorization': `Token ${this.authToken}`
+                    }
+                });
 
-            if (response.ok) {
-                this.currentImage = await response.json();
-                this.clearImageData();
-                await this.loadImageInCanvas();
-                // Annotations are now loaded in loadImageInCanvas after transform is set
-                await this.loadImageTranscriptions();
-                
-                // Refresh annotation positions after image and transform are set
-                this.refreshAnnotationPositions();
-                
-                // Show image viewer
-                document.getElementById('defaultView').style.display = 'none';
-                document.getElementById('imageViewer').style.display = 'block';
+                if (response.ok) {
+                    this.currentImage = await response.json();
+                    this.clearImageData();
+                    await this.loadImageInCanvas();
+                    // Annotations and transcriptions now loaded inside loadImageInCanvas after proper sequencing
+                    
+                    // Refresh annotation positions after image and transform are set
+                    this.refreshAnnotationPositions();
+                    
+                    // Show image viewer
+                    document.getElementById('defaultView').style.display = 'none';
+                    document.getElementById('imageViewer').style.display = 'block';
+                }
             }
         } catch (error) {
             console.error('Error selecting image:', error);
@@ -6622,9 +8374,17 @@ async ensureMainZonePrompt() {
 
                 // Load annotations AFTER image transform is set up
                 await this.loadImageAnnotations();
+                
+                // Load transcriptions AFTER annotations are loaded (for proper linking)
+                await this.loadImageTranscriptions();
             };
 
-            imgElement.src = this.currentImage.image_file;
+            // Set image source - in browser cache mode this is base64, in server mode it's a URL
+            if (this.isBrowserCacheMode) {
+                imgElement.src = this.currentImage.image_file; // Already base64 data URL
+            } else {
+                imgElement.src = this.currentImage.image_file; // Server URL path
+            }
         } catch (error) {
             console.error('Error loading image in canvas:', error);
         }
@@ -6634,15 +8394,24 @@ async ensureMainZonePrompt() {
         if (!this.currentImage) return;
 
         try {
-            const response = await fetch(`${this.apiBaseUrl}/images/${this.currentImage.id}/annotations/`, {
-                headers: {
-                    'Authorization': `Token ${this.authToken}`
-                }
-            });
-
-            if (response.ok) {
-                const annotations = await response.json();
+            if (this.isBrowserCacheMode) {
+                // Load annotations from browser cache
+                const annotations = await this.localStorage.getAll('annotations', 'image_id', this.currentImage.id);
+                console.log('Loading annotations for image:', this.currentImage.id, 'Found:', annotations.length);
+                // Sort by reading order
+                annotations.sort((a, b) => (a.reading_order || 0) - (b.reading_order || 0));
                 this.renderAnnotationsOnCanvas(annotations);
+            } else {
+                const response = await fetch(`${this.apiBaseUrl}/images/${this.currentImage.id}/annotations/`, {
+                    headers: {
+                        'Authorization': `Token ${this.authToken}`
+                    }
+                });
+
+                if (response.ok) {
+                    const annotations = await response.json();
+                    this.renderAnnotationsOnCanvas(annotations);
+                }
             }
         } catch (error) {
             console.error('Error loading annotations:', error);
@@ -6737,15 +8506,9 @@ async ensureMainZonePrompt() {
         if (!this.currentImage) return;
 
         try {
-            const response = await fetch(`${this.apiBaseUrl}/transcriptions/?image=${this.currentImage.id}`, {
-                headers: {
-                    'Authorization': `Token ${this.authToken}`
-                }
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                const transcriptions = data.results;
+            if (this.isBrowserCacheMode) {
+                // Load transcriptions from browser cache
+                const transcriptions = await this.localStorage.getAll('transcriptions', 'image', this.currentImage.id);
                 
                 // Find the latest full image transcription
                 const imageTranscription = transcriptions.find(t => 
@@ -6758,12 +8521,41 @@ async ensureMainZonePrompt() {
                 // Update annotation transcriptions
                 transcriptions.forEach(transcription => {
                     if (transcription.transcription_type === 'annotation' && transcription.is_current) {
-                        this.updateAnnotationTranscription(transcription.annotation.id, transcription);
+                        this.updateAnnotationTranscription(transcription.annotation, transcription);
                     }
                 });
 
                 // Update the combined transcription display
                 this.updateCombinedTranscription();
+            } else {
+                const response = await fetch(`${this.apiBaseUrl}/transcriptions/?image=${this.currentImage.id}`, {
+                    headers: {
+                        'Authorization': `Token ${this.authToken}`
+                    }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    const transcriptions = data.results;
+                    
+                    // Find the latest full image transcription
+                    const imageTranscription = transcriptions.find(t => 
+                        t.transcription_type === 'full_image' && t.is_current
+                    );
+                    
+                    // Store current image transcription
+                    this.currentImageTranscription = imageTranscription;
+
+                    // Update annotation transcriptions
+                    transcriptions.forEach(transcription => {
+                        if (transcription.transcription_type === 'annotation' && transcription.is_current) {
+                            this.updateAnnotationTranscription(transcription.annotation.id, transcription);
+                        }
+                    });
+
+                    // Update the combined transcription display
+                    this.updateCombinedTranscription();
+                }
             }
         } catch (error) {
             console.error('Error loading transcriptions:', error);
@@ -7432,19 +9224,59 @@ async ensureMainZonePrompt() {
     async deleteProject(projectId) {
         if (confirm('Are you sure you want to delete this project? This will delete all documents and images in it.')) {
             try {
-                const response = await fetch(`${this.apiBaseUrl}/projects/${projectId}/`, {
-                    method: 'DELETE',
-                    headers: {
-                        'Authorization': `Token ${this.authToken}`
+                if (this.isBrowserCacheMode) {
+                    // Delete from browser cache
+                    
+                    // Get all documents for this project
+                    const documents = await this.localStorage.getAll('documents', 'project_id', projectId);
+                    
+                    // Delete all related data
+                    for (const document of documents) {
+                        // Get all images for this document
+                        const images = await this.localStorage.getAll('images', 'document_id', document.id);
+                        
+                        for (const image of images) {
+                            // Delete annotations for this image
+                            const annotations = await this.localStorage.getAll('annotations', 'image_id', image.id);
+                            for (const annotation of annotations) {
+                                await this.localStorage.delete('annotations', annotation.id);
+                            }
+                            
+                            // Delete transcriptions for this image
+                            const transcriptions = await this.localStorage.getAll('transcriptions', 'image', image.id);
+                            for (const transcription of transcriptions) {
+                                await this.localStorage.delete('transcriptions', transcription.id);
+                            }
+                            
+                            // Delete image
+                            await this.localStorage.delete('images', image.id);
+                        }
+                        
+                        // Delete document
+                        await this.localStorage.delete('documents', document.id);
                     }
-                });
-
-                if (response.ok) {
+                    
+                    // Delete project
+                    await this.localStorage.delete('projects', projectId);
+                    
                     this.showAlert('Project deleted successfully', 'success');
                     await this.loadProjects();
                 } else {
-                    const error = await response.json();
-                    this.showAlert(error.detail || 'Failed to delete project', 'danger');
+                    // Use server API
+                    const response = await fetch(`${this.apiBaseUrl}/projects/${projectId}/`, {
+                        method: 'DELETE',
+                        headers: {
+                            'Authorization': `Token ${this.authToken}`
+                        }
+                    });
+
+                    if (response.ok) {
+                        this.showAlert('Project deleted successfully', 'success');
+                        await this.loadProjects();
+                    } else {
+                        const error = await response.json();
+                        this.showAlert(error.detail || 'Failed to delete project', 'danger');
+                    }
                 }
             } catch (error) {
                 console.error('Delete project error:', error);
@@ -7456,19 +9288,50 @@ async ensureMainZonePrompt() {
     async deleteDocument(documentId) {
         if (confirm('Are you sure you want to delete this document? This will delete all images in it.')) {
             try {
-                const response = await fetch(`${this.apiBaseUrl}/documents/${documentId}/`, {
-                    method: 'DELETE',
-                    headers: {
-                        'Authorization': `Token ${this.authToken}`
+                if (this.isBrowserCacheMode) {
+                    // Delete from browser cache
+                    
+                    // Get all images for this document
+                    const images = await this.localStorage.getAll('images', 'document_id', documentId);
+                    
+                    for (const image of images) {
+                        // Delete annotations for this image
+                        const annotations = await this.localStorage.getAll('annotations', 'image_id', image.id);
+                        for (const annotation of annotations) {
+                            await this.localStorage.delete('annotations', annotation.id);
+                        }
+                        
+                        // Delete transcriptions for this image
+                        const transcriptions = await this.localStorage.getAll('transcriptions', 'image', image.id);
+                        for (const transcription of transcriptions) {
+                            await this.localStorage.delete('transcriptions', transcription.id);
+                        }
+                        
+                        // Delete image
+                        await this.localStorage.delete('images', image.id);
                     }
-                });
-
-                if (response.ok) {
+                    
+                    // Delete document
+                    await this.localStorage.delete('documents', documentId);
+                    
                     this.showAlert('Document deleted successfully', 'success');
                     await this.loadProjects();
                 } else {
-                    const error = await response.json();
-                    this.showAlert(error.detail || 'Failed to delete document', 'danger');
+                    // Use server API
+                    const response = await fetch(`${this.apiBaseUrl}/documents/${documentId}/`, {
+                        method: 'DELETE',
+                        headers: {
+                            'Authorization': `Token ${this.authToken}`
+                        }
+                    });
+
+                    if (response.ok) {
+                        this.showAlert('Document deleted successfully', 'success');
+                        await this.loadProjects();
+                    } else {
+                        const error = await response.json();
+                        this.showAlert(error.detail || 'Failed to delete document', 'danger');
+                    }
                 }
             } catch (error) {
                 console.error('Delete document error:', error);
@@ -7480,14 +9343,24 @@ async ensureMainZonePrompt() {
     async deleteImage(imageId) {
         if (confirm('Are you sure you want to delete this image?')) {
             try {
-                const response = await fetch(`${this.apiBaseUrl}/images/${imageId}/`, {
-                    method: 'DELETE',
-                    headers: {
-                        'Authorization': `Token ${this.authToken}`
+                if (this.isBrowserCacheMode) {
+                    // Delete from browser cache
+                    
+                    // Delete annotations for this image
+                    const annotations = await this.localStorage.getAll('annotations', 'image_id', imageId);
+                    for (const annotation of annotations) {
+                        await this.localStorage.delete('annotations', annotation.id);
                     }
-                });
-
-                if (response.ok) {
+                    
+                    // Delete transcriptions for this image
+                    const transcriptions = await this.localStorage.getAll('transcriptions', 'image', imageId);
+                    for (const transcription of transcriptions) {
+                        await this.localStorage.delete('transcriptions', transcription.id);
+                    }
+                    
+                    // Delete image
+                    await this.localStorage.delete('images', imageId);
+                    
                     this.showAlert('Image deleted successfully', 'success');
                     await this.loadProjects();
                     
@@ -7499,8 +9372,29 @@ async ensureMainZonePrompt() {
                             '<p class="text-muted">Select an image to view transcription</p>';
                     }
                 } else {
-                    const error = await response.json();
-                    this.showAlert(error.detail || 'Failed to delete image', 'danger');
+                    // Use server API
+                    const response = await fetch(`${this.apiBaseUrl}/images/${imageId}/`, {
+                        method: 'DELETE',
+                        headers: {
+                            'Authorization': `Token ${this.authToken}`
+                        }
+                    });
+
+                    if (response.ok) {
+                        this.showAlert('Image deleted successfully', 'success');
+                        await this.loadProjects();
+                        
+                        // If this was the current image, clear the viewer
+                        if (this.currentImage && this.currentImage.id === imageId) {
+                            this.currentImage = null;
+                            this.canvas.clear();
+                            document.getElementById('transcriptionContent').innerHTML = 
+                                '<p class="text-muted">Select an image to view transcription</p>';
+                        }
+                    } else {
+                        const error = await response.json();
+                        this.showAlert(error.detail || 'Failed to delete image', 'danger');
+                    }
                 }
             } catch (error) {
                 console.error('Delete image error:', error);

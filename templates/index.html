@@ -12,6 +12,8 @@
     
     <!-- Fabric.js for image annotation -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+    <!-- JSZip for ZIP file handling in browser cache mode -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
 <body>
     <!-- Navigation -->
@@ -32,14 +34,19 @@
                             <i class="fas fa-folder me-1"></i>Projects
                         </a>
                     </li>
-                    <li class="nav-item">
+                    <li class="nav-item" id="serverExportsNav">
                         <a class="nav-link" href="#" onclick="showExports()">
                             <i class="fas fa-download me-1"></i>Exports
                         </a>
                     </li>
-                    <li class="nav-item">
+                    <li class="nav-item" id="serverImportsNav">
                         <a class="nav-link" href="#" onclick="showImports()">
                             <i class="fas fa-upload me-1"></i>Import
+                        </a>
+                    </li>
+                    <li class="nav-item" id="browserCacheDataNav" style="display: none;">
+                        <a class="nav-link" href="#" onclick="app.showBrowserCacheExportModal()">
+                            <i class="fas fa-database me-1"></i>Browser Data
                         </a>
                     </li>
                 </ul>
@@ -53,8 +60,11 @@
                             <li><a class="dropdown-item" href="#" onclick="showCredentialsModal()">
                                 <i class="fas fa-key me-2"></i>API Credentials
                             </a></li>
+                            <li id="browserCacheExitOption" style="display: none;"><a class="dropdown-item" href="#" onclick="app.exitBrowserCacheMode()">
+                                <i class="fas fa-times me-2"></i>Exit Browser Cache Mode
+                            </a></li>
                             <li><hr class="dropdown-divider"></li>
-                            <li><a class="dropdown-item" href="#" onclick="logout()">
+                            <li id="logoutOption"><a class="dropdown-item" href="#" onclick="logout()">
                                 <i class="fas fa-sign-out-alt me-2"></i>Logout
                             </a></li>
                         </ul>
@@ -128,9 +138,19 @@
                         <button class="btn btn-primary btn-lg me-3" onclick="showRegister()">
                             <i class="fas fa-user-plus me-2"></i>Get Started
                         </button>
-                        <button class="btn btn-outline-primary btn-lg" onclick="showLogin()">
+                        <button class="btn btn-outline-primary btn-lg me-3" onclick="showLogin()">
                             <i class="fas fa-sign-in-alt me-2"></i>Sign In
                         </button>
+                        <button class="btn btn-success btn-lg" onclick="app.startBrowserCacheMode()">
+                            <i class="fas fa-database me-2"></i>Use Browser Cache
+                        </button>
+                    </div>
+                    
+                    <div class="mt-4 text-center">
+                        <div class="alert alert-info d-inline-block">
+                            <i class="fas fa-info-circle me-2"></i>
+                            <strong>Browser Cache Mode:</strong> Use all features without an account. Data is stored locally in your browser.
+                        </div>
                     </div>
                 </div>
             </div>
