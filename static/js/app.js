@@ -11,6 +11,7 @@ class OCRApp {
         this.canvas = null;
         this.currentTool = 'select';
         this.isDrawing = false;
+        this.isCreatingAnnotation = false;
         this.annotations = [];
         this.selectedAnnotations = [];
         
@@ -1032,6 +1033,12 @@ async ensureMainZonePrompt() {
 
     onMouseDown(event) {
         if (this.currentTool === 'select') return;
+        
+        // Prevent creating new objects if we're clicking on an existing object
+        const target = this.canvas.findTarget(event.e);
+        if (target && target.annotationId) {
+            return; // Let Fabric.js handle the interaction with existing objects
+        }
 
         const pointer = this.canvas.getPointer(event.e);
         this.isDrawing = true;
@@ -1135,6 +1142,13 @@ async ensureMainZonePrompt() {
     }
 
     async addAnnotation(fabricObject, type) {
+        // Prevent concurrent annotation creation
+        if (this.isCreatingAnnotation) {
+            console.warn('Annotation creation already in progress');
+            return;
+        }
+        
+        this.isCreatingAnnotation = true;
         const tempId = 'temp_' + Date.now();
         const coordinates = this.getAnnotationCoordinates(fabricObject, type);
         const readingOrder = this.annotations.length;
@@ -1190,6 +1204,9 @@ async ensureMainZonePrompt() {
                     this.annotations[annotationIndex].reading_order = savedAnnotation.reading_order;
                     this.annotations[annotationIndex].classification = savedAnnotation.classification;
                     fabricObject.annotationId = savedAnnotation.id;
+                    
+                    // Update the annotation list to reflect the new annotation
+                    this.updateAnnotationsList();
                 }
                 
                 console.log('Annotation saved successfully:', savedAnnotation.id);
@@ -1202,8 +1219,14 @@ async ensureMainZonePrompt() {
             this.showAlert('Error saving annotation', 'warning');
         }
         
+        // Automatically switch to select mode after creating annotation
+        this.setTool('select');
+        
         // Refresh canvas to ensure proper interaction with the new annotation
         this.canvas.renderAll();
+        
+        // Reset creation flag
+        this.isCreatingAnnotation = false;
     }
 
     getAnnotationCoordinates(fabricObject, type) {
@@ -1282,8 +1305,16 @@ async ensureMainZonePrompt() {
     async onObjectModified(event) {
         const modifiedObject = event.target;
         if (modifiedObject.annotationId && !modifiedObject.annotationId.startsWith('temp_')) {
-            // Save the updated annotation coordinates
-            await this.updateAnnotationCoordinates(modifiedObject);
+            // Debounce rapid modifications to avoid excessive API calls
+            if (this.updateTimeout) {
+                clearTimeout(this.updateTimeout);
+            }
+            
+            this.updateTimeout = setTimeout(async () => {
+                // Save the updated annotation coordinates
+                await this.updateAnnotationCoordinates(modifiedObject);
+                this.updateTimeout = null;
+            }, 300); // Wait 300ms after last modification
         }
     }
 
@@ -1301,7 +1332,7 @@ async ensureMainZonePrompt() {
                     height: fabricObject.height * fabricObject.scaleY
                 };
                 
-                // Reset scale after getting scaled dimensions
+                // Reset scale after getting scaled dimensions to avoid compound scaling
                 fabricObject.set({
                     width: canvasCoordinates.width,
                     height: canvasCoordinates.height,
@@ -1313,6 +1344,9 @@ async ensureMainZonePrompt() {
                     uniScaleTransform: false,
                     centeredScaling: false
                 });
+                
+                // Force canvas refresh to ensure visual consistency
+                this.canvas.renderAll();
             } else if (annotation.type === 'polygon') {
                 canvasCoordinates = {
                     points: fabricObject.points.map(point => ({
