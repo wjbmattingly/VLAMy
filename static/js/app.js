@@ -12,13 +12,23 @@ class LocalStorageManager {
     async init() {
         if (this.isInitialized) return;
         
-        return new Promise((resolve, reject) => {
+        // Prevent race conditions by sharing the initialization promise
+        if (this.initPromise) {
+            return this.initPromise;
+        }
+        
+        this.initPromise = new Promise((resolve, reject) => {
             const request = indexedDB.open(this.dbName, this.dbVersion);
             
-            request.onerror = () => reject(request.error);
+            request.onerror = () => {
+                this.initPromise = null; // Reset on error so it can be retried
+                reject(request.error);
+            };
+            
             request.onsuccess = () => {
                 this.db = request.result;
                 this.isInitialized = true;
+                this.initPromise = null; // Clear the promise since we're done
                 resolve();
             };
             
@@ -61,6 +71,8 @@ class LocalStorageManager {
                 }
             };
         });
+        
+        return this.initPromise;
     }
 
     generateId() {
@@ -1074,6 +1086,11 @@ class OCRApp {
         
         if (this.isBrowserCacheMode) {
             try {
+                // Explicitly initialize localStorage before any operations
+                console.log('Initializing browser cache database...');
+                await this.localStorage.init();
+                console.log('Browser cache database initialized successfully');
+                
                 await this.loadBrowserCacheSettings();
                 await this.loadAnnotationTypes();
                 this.showAppInterface();
@@ -1250,21 +1267,11 @@ class OCRApp {
                 this.authToken = data.token;
                 localStorage.setItem('authToken', this.authToken);
                 
-                console.log('Login successful, loading user data...');
-                
                 try {
                     await this.loadUserProfile();
-                    console.log('User profile loaded');
-                    
                     await this.loadAnnotationTypes();
-                    console.log('Annotation types loaded');
-                    
                     this.showAppInterface();
-                    console.log('App interface shown');
-                    
                     await this.loadProjects();
-                    console.log('Projects loaded');
-                    
                     this.showAlert('Login successful!', 'success');
                 } catch (initError) {
                     console.error('Error during post-login initialization:', initError);
@@ -1503,8 +1510,6 @@ class OCRApp {
     }
 
     showLoading(show) {
-        console.log(`Loading spinner ${show ? 'SHOW' : 'HIDE'} called from:`, new Error().stack.split('\n')[2]);
-        
         const spinner = document.getElementById('loadingSpinner');
         if (spinner) {
             // Use CSS classes instead of inline styles to override !important
@@ -1512,14 +1517,10 @@ class OCRApp {
                 spinner.classList.remove('d-none');
                 spinner.classList.add('d-flex');
                 spinner.style.display = ''; // Clear any inline display style
-                console.log('Loading spinner shown - classes:', spinner.className);
             } else {
                 spinner.classList.remove('d-flex');
                 spinner.classList.add('d-none');
-                console.log('Loading spinner hidden - classes:', spinner.className);
             }
-        } else {
-            console.error('Loading spinner element not found!');
         }
         
         // Auto-clear loading after 5 seconds to prevent stuck loading states in server mode
@@ -8103,29 +8104,41 @@ class OCRApp {
         try {
             if (this.isBrowserCacheMode) {
                 // Create project in browser cache (no loading spinner needed for instant local operations)
-                const existingProjects = await this.localStorage.getAll('projects');
-                const maxOrder = existingProjects.reduce((max, p) => Math.max(max, p.order || 0), 0);
-                
-                const projectData = {
-                    name,
-                    description: description || '',
-                    order: maxOrder + 1,
-                    is_public: false
-                };
-                
-                const project = await this.localStorage.add('projects', projectData);
-                bootstrap.Modal.getInstance(document.getElementById('createProjectModal')).hide();
-                document.getElementById('createProjectForm').reset();
-                
-                // Load projects with error handling
                 try {
-                    await this.loadProjects();
-                } catch (error) {
-                    console.error('Error loading projects after creation:', error);
-                    // Still show success message since project was created
+                    // Ensure database is initialized
+                    await this.localStorage.init();
+                    
+                    const existingProjects = await this.localStorage.getAll('projects');
+                    const maxOrder = existingProjects.reduce((max, p) => Math.max(max, p.order || 0), 0);
+                    
+                    const projectData = {
+                        name,
+                        description: description || '',
+                        order: maxOrder + 1,
+                        is_public: false
+                    };
+                    
+                    console.log('Creating project in browser cache:', projectData);
+                    const project = await this.localStorage.add('projects', projectData);
+                    console.log('Project created successfully:', project);
+                    
+                    bootstrap.Modal.getInstance(document.getElementById('createProjectModal')).hide();
+                    document.getElementById('createProjectForm').reset();
+                    
+                    // Load projects with error handling
+                    try {
+                        await this.loadProjects();
+                    } catch (error) {
+                        console.error('Error loading projects after creation:', error);
+                        // Still show success message since project was created
+                    }
+                    
+                    this.showAlert('Project created successfully!', 'success');
+                } catch (initError) {
+                    console.error('Error creating project in browser cache:', initError);
+                    this.showAlert('Failed to create project. Please try again.', 'danger');
+                    return;
                 }
-                
-                this.showAlert('Project created successfully!', 'success');
             } else {
                 // Server operations need loading spinner
                 this.showLoading(true);
@@ -8204,27 +8217,39 @@ class OCRApp {
 
             if (this.isBrowserCacheMode) {
                 // Create document in browser cache (no loading spinner needed for instant local operations)
-                const documentData = {
-                    name,
-                    description: description || '',
-                    project_id: this.selectedProjectId,
-                    reading_order: readingOrder || null,
-                    default_transcription_type: 'full_image'
-                };
-                
-                const newDocument = await this.localStorage.add('documents', documentData);
-                bootstrap.Modal.getInstance(document.getElementById('createDocumentModal')).hide();
-                document.getElementById('createDocumentForm').reset();
-                
-                // Load projects with error handling
                 try {
-                    await this.loadProjects();
-                } catch (error) {
-                    console.error('Error loading projects after document creation:', error);
-                    // Still show success message since document was created
+                    // Ensure database is initialized
+                    await this.localStorage.init();
+                    
+                    const documentData = {
+                        name,
+                        description: description || '',
+                        project_id: this.selectedProjectId,
+                        reading_order: readingOrder || null,
+                        default_transcription_type: 'full_image'
+                    };
+                    
+                    console.log('Creating document in browser cache:', documentData);
+                    const newDocument = await this.localStorage.add('documents', documentData);
+                    console.log('Document created successfully:', newDocument);
+                    
+                    bootstrap.Modal.getInstance(document.getElementById('createDocumentModal')).hide();
+                    document.getElementById('createDocumentForm').reset();
+                    
+                    // Load projects with error handling
+                    try {
+                        await this.loadProjects();
+                    } catch (error) {
+                        console.error('Error loading projects after document creation:', error);
+                        // Still show success message since document was created
+                    }
+                    
+                    this.showAlert('Document created successfully!', 'success');
+                } catch (initError) {
+                    console.error('Error creating document in browser cache:', initError);
+                    this.showAlert('Failed to create document. Please try again.', 'danger');
+                    return;
                 }
-                
-                this.showAlert('Document created successfully!', 'success');
             } else {
                 // Server operations need loading spinner
                 this.showLoading(true);
