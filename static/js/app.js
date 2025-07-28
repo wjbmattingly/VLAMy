@@ -512,6 +512,11 @@ async ensureMainZonePrompt() {
     setTool(tool) {
         this.currentTool = tool;
         
+        // Reset drawing state when switching tools
+        if (this.isDrawing) {
+            this.isDrawing = false;
+        }
+        
         // Update tool buttons
         document.querySelectorAll('.toolbar .btn').forEach(btn => {
             btn.classList.remove('active');
@@ -530,10 +535,19 @@ async ensureMainZonePrompt() {
         if (tool === 'select') {
             this.canvas.selection = true;
             this.canvas.defaultCursor = 'default';
+            // Ensure all objects are selectable when switching to select mode
+            this.canvas.forEachObject((obj) => {
+                if (obj.annotationId) {
+                    obj.selectable = true;
+                }
+            });
         } else {
             this.canvas.selection = false;
             this.canvas.defaultCursor = 'crosshair';
         }
+        
+        // Refresh canvas to apply changes
+        this.canvas.renderAll();
     }
 
     populateClassificationSelector() {
@@ -641,8 +655,19 @@ async ensureMainZonePrompt() {
 
         checklist.innerHTML = '';
 
-        // Add Zone Types section
-        checklist.insertAdjacentHTML('beforeend', '<div class="config-group-header">Zone Types</div>');
+        // Create three columns - reordered: Zones, Lines, Custom Zones
+        const zonesColumn = document.createElement('div');
+        zonesColumn.className = 'annotation-type-column';
+        
+        const linesColumn = document.createElement('div');
+        linesColumn.className = 'annotation-type-column';
+        
+        const customZonesColumn = document.createElement('div');
+        customZonesColumn.className = 'annotation-type-column';
+        customZonesColumn.id = 'customZonesColumn';
+
+        // Add Zone Types column
+        zonesColumn.innerHTML = '<h6><i class="fas fa-square me-2"></i>Zone Types</h6>';
         
         this.annotationTypes.all_types.zones.forEach(zoneType => {
             const isEnabled = this.userEnabledTypes.zones.includes(zoneType.value);
@@ -660,18 +685,40 @@ async ensureMainZonePrompt() {
                            onchange="app.updateZoneColor('${zoneType.value}', this.value)">
                 </div>
             `;
-            checklist.insertAdjacentHTML('beforeend', checkboxHtml);
+            zonesColumn.insertAdjacentHTML('beforeend', checkboxHtml);
         });
 
-        // Add Custom Zones section
-        checklist.insertAdjacentHTML('beforeend', `
-            <div class="config-group-header">
-                Custom Zones
-                <button class="btn btn-xs btn-outline-success ms-2" onclick="app.showAddCustomZoneModal()" title="Add Custom Zone">
+        // Add Line Types column
+        linesColumn.innerHTML = '<h6><i class="fas fa-minus me-2"></i>Line Types</h6>';
+        
+        this.annotationTypes.all_types.lines.forEach(lineType => {
+            const isEnabled = this.userEnabledTypes.lines.includes(lineType.value);
+            const color = this.zoneColors[lineType.value] || '#0066cc';
+            const checkboxHtml = `
+                <div class="form-check zone-type-item" data-zone-type="${lineType.value}">
+                    <input class="form-check-input" type="checkbox" value="${lineType.value}" 
+                           id="type_${lineType.value}" ${isEnabled ? 'checked' : ''}
+                           onchange="app.handleAnnotationTypeChange()">
+                    <label class="form-check-label" for="type_${lineType.value}">
+                        ${lineType.label}
+                    </label>
+                    <input type="color" class="form-control form-control-sm zone-color-picker" 
+                           value="${color}" title="Change color"
+                           onchange="app.updateZoneColor('${lineType.value}', this.value)">
+                </div>
+            `;
+            linesColumn.insertAdjacentHTML('beforeend', checkboxHtml);
+        });
+
+        // Add Custom Zones column
+        customZonesColumn.innerHTML = `
+            <h6>
+                <i class="fas fa-layer-group me-2"></i>Custom Zones
+                <button class="btn btn-xs btn-outline-success" onclick="app.showAddCustomZoneModal()" title="Add Custom Zone">
                     <i class="fas fa-plus"></i>
                 </button>
-            </div>
-        `);
+            </h6>
+        `;
         
         this.customZones.forEach(customZone => {
             const isEnabled = this.userEnabledTypes.zones.includes(customZone.value);
@@ -694,30 +741,38 @@ async ensureMainZonePrompt() {
                     </div>
                 </div>
             `;
-            checklist.insertAdjacentHTML('beforeend', checkboxHtml);
+            customZonesColumn.insertAdjacentHTML('beforeend', checkboxHtml);
         });
 
-        // Add Line Types section
-        checklist.insertAdjacentHTML('beforeend', '<div class="config-group-header">Line Types</div>');
+        // Append columns in new order: Zones, Lines, Custom Zones
+        checklist.appendChild(zonesColumn);
+        checklist.appendChild(linesColumn);
+        checklist.appendChild(customZonesColumn);
+
+        // Set initial visibility based on toggle state
+        this.updateCustomZonesVisibility();
+    }
+
+    toggleCustomZones(enabled) {
+        // Store the setting in localStorage
+        localStorage.setItem('customZonesEnabled', enabled);
+        this.updateCustomZonesVisibility();
+    }
+
+    updateCustomZonesVisibility() {
+        const checkbox = document.getElementById('enableCustomZones');
+        const customZonesColumn = document.getElementById('customZonesColumn');
         
-        this.annotationTypes.all_types.lines.forEach(lineType => {
-            const isEnabled = this.userEnabledTypes.lines.includes(lineType.value);
-            const color = this.zoneColors[lineType.value] || '#0066cc';
-            const checkboxHtml = `
-                <div class="form-check zone-type-item" data-zone-type="${lineType.value}">
-                    <input class="form-check-input" type="checkbox" value="${lineType.value}" 
-                           id="type_${lineType.value}" ${isEnabled ? 'checked' : ''}
-                           onchange="app.handleAnnotationTypeChange()">
-                    <label class="form-check-label" for="type_${lineType.value}">
-                        ${lineType.label}
-                    </label>
-                    <input type="color" class="form-control form-control-sm zone-color-picker" 
-                           value="${color}" title="Change color"
-                           onchange="app.updateZoneColor('${lineType.value}', this.value)">
-                </div>
-            `;
-            checklist.insertAdjacentHTML('beforeend', checkboxHtml);
-        });
+        if (!checkbox || !customZonesColumn) return;
+
+        // Get the setting from localStorage (default to false)
+        const enabled = localStorage.getItem('customZonesEnabled') === 'true';
+        
+        // Update checkbox state
+        checkbox.checked = enabled;
+        
+        // Show/hide the custom zones column
+        customZonesColumn.style.display = enabled ? 'block' : 'none';
     }
 
     async handleAnnotationTypeChange() {
@@ -1222,8 +1277,20 @@ async ensureMainZonePrompt() {
         // Automatically switch to select mode after creating annotation
         this.setTool('select');
         
-        // Refresh canvas to ensure proper interaction with the new annotation
+        // Ensure the canvas is properly refreshed and the new object is selectable
         this.canvas.renderAll();
+        
+        // Force canvas to recognize the new object for selection
+        this.canvas.discardActiveObject();
+        
+        // Make the newly created object immediately selectable by setting it as active
+        if (fabricObject && fabricObject.selectable) {
+            // Small delay to ensure canvas is ready, then select the new object
+            setTimeout(() => {
+                this.canvas.setActiveObject(fabricObject);
+                this.canvas.renderAll();
+            }, 10);
+        }
         
         // Reset creation flag
         this.isCreatingAnnotation = false;
@@ -7706,6 +7773,10 @@ function toggleAllTranscriptionLineTypes(selectAll) {
 
 function startSelectedZoneTranscription() {
     app.startSelectedZoneTranscription();
+}
+
+function toggleCustomZones(enabled) {
+    app.toggleCustomZones(enabled);
 }
 
 // Utility function for parsing model JSON responses

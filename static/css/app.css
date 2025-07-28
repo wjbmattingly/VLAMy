@@ -1475,49 +1475,169 @@ body.resizing * {
 }
 
 .config-checklist {
-    max-height: 200px;
-    overflow-y: auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    max-height: none; /* Remove height restriction */
+    overflow-y: visible; /* Remove scrolling */
 }
 
-.config-checklist .form-check {
-    margin-bottom: 0.375rem;
+.annotation-type-column {
+    flex: 1;
+    min-width: 150px; /* Reduced from 200px */
+    border: 1px solid var(--border-color);
+    border-radius: 0.375rem;
+    padding: 0.75rem;
+    background-color: var(--card-bg, #ffffff);
+    min-height: 100px;
+}
+
+.annotation-type-column:empty::after {
+    content: "No items available";
+    color: var(--text-muted);
+    font-style: italic;
     font-size: 0.875rem;
-    padding-left: 1.5rem;
 }
 
-.config-checklist .form-check:last-child {
-    margin-bottom: 0;
-}
-
-.config-checklist .form-check-input {
-    margin-top: 0.125rem;
-}
-
-.config-checklist .form-check-label {
-    color: #495057;
-    cursor: pointer;
-}
-
-.config-checklist .form-check-input:checked + .form-check-label {
-    color: #212529;
-    font-weight: 500;
-}
-
-/* Group headers in checklist */
-.config-group-header {
+.annotation-type-column h6 {
     font-size: 0.75rem;
     font-weight: 600;
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    margin: 0.75rem 0 0.375rem 0;
+    margin: 0 0 0.75rem 0;
     padding-bottom: 0.25rem;
     border-bottom: 1px solid #e9ecef;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
 }
 
-.config-group-header:first-child {
+.annotation-type-column .form-check {
+    margin-bottom: 0.5rem;
+    font-size: 0.875rem;
+}
+
+.annotation-type-column .form-check:last-child {
+    margin-bottom: 0;
+}
+
+.annotation-type-column .form-check-input {
+    margin-top: 0.125rem;
+}
+
+.annotation-type-column .form-check-label {
+    color: #495057;
+    cursor: pointer;
+    flex: 1;
+    word-wrap: break-word; /* Allow text wrapping */
+    hyphens: auto; /* Enable hyphenation for better wrapping */
+}
+
+.annotation-type-column .form-check-input:checked + .form-check-label {
+    color: #212529;
+    font-weight: 500;
+}
+
+/* Custom zones toggle */
+.custom-zones-toggle {
+    margin-bottom: 1rem;
+    padding: 0.5rem;
+    background-color: #f8f9fa;
+    border-radius: 0.375rem;
+    border: 1px solid #e9ecef;
+}
+
+.custom-zones-toggle .form-check {
+    margin-bottom: 0;
+}
+
+.custom-zones-toggle .form-check-label {
+    font-weight: 500;
+    color: #495057;
+}
+
+/* Responsive design for smaller screens */
+@media (max-width: 1200px) {
+    .config-checklist {
+        flex-direction: column;
+    }
+    
+    .annotation-type-column {
+        min-width: auto;
+    }
+}
+
+/* Responsive for very small screens */
+@media (max-width: 800px) {
+    .annotation-type-column {
+        min-width: 120px; /* Even smaller on mobile */
+    }
+}
+
+/* Zone type items with color pickers */
+.zone-type-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.zone-type-item .form-check-input {
     margin-top: 0;
 }
+
+.zone-type-item .form-check-label {
+    flex: 1;
+    margin-bottom: 0;
+}
+
+.zone-color-picker {
+    width: 30px !important;
+    height: 24px !important;
+    border: 1px solid #dee2e6 !important;
+    border-radius: 3px !important;
+    padding: 0 !important;
+    cursor: pointer;
+    transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+.zone-color-picker:hover {
+    border-color: #adb5bd !important;
+}
+
+.zone-color-picker:focus {
+    border-color: #86b7fe !important;
+    outline: 0;
+    box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25) !important;
+}
+
+.zone-color-picker::-webkit-color-swatch-wrapper {
+    padding: 0;
+    border-radius: 2px;
+}
+
+.zone-color-picker::-webkit-color-swatch {
+    border: none;
+    border-radius: 2px;
+}
+
+.custom-zone-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.custom-zone-controls .btn {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Legacy config-checklist styles (keeping for backward compatibility) */
 
 /* Classification badge in transcription items */
 .classification-badge {
@@ -1559,8 +1679,6 @@ body.resizing * {
     line-height: 1.2;
 }
 
-
-
 /* Prompts List */
 .prompts-list {
     max-height: 300px;
@@ -1588,7 +1706,7 @@ body.resizing * {
 
 .prompt-item-header {
     display: flex;
-    justify-content: between;
+    justify-content: space-between;
     align-items: center;
     margin-bottom: 0.5rem;
 }
@@ -1665,236 +1783,6 @@ body.resizing * {
     font-size: 0.875rem;
     font-weight: 500;
     margin-bottom: 0.25rem;
-} 
-
-/* Bulk Selection Styles */
-.bulk-actions-bar {
-    background-color: #fff3cd;
-    border-color: #ffeaa7;
-    animation: slideDown 0.3s ease;
-}
-
-.bulk-select-checkbox {
-    position: absolute;
-    left: 8px;
-    top: 50%;
-    transform: translateY(-50%);
-    z-index: 10;
-}
-
-.tree-item.bulk-selectable {
-    cursor: pointer;
-    transition: all 0.2s ease;
-}
-
-.tree-item.bulk-selected {
-    background-color: rgba(0, 123, 255, 0.1);
-    border-left: 3px solid #007bff;
-}
-
-.bulk-select-mode .tree-item {
-    padding-left: 36px;
-}
-
-.bulk-select-mode .tree-actions {
-    opacity: 0 !important;
-}
-
-.bulk-select-mode .tree-item-content {
-    position: relative;
-}
-
-/* IIIF Import Styles */
-.list-group-item-action {
-    cursor: pointer;
-    transition: all 0.2s ease;
-    border: 1px solid transparent;
-}
-
-.list-group-item-action:hover {
-    background-color: #f8f9fa;
-    border-color: var(--primary-color);
-}
-
-.list-group-item-action:active {
-    background-color: #e3f2fd;
-}
-
-/* Better document icon */
-.fa-file-alt {
-    color: #28a745;
-}
-
-/* Loading state for import */
-.loading {
-    opacity: 0.6;
-    pointer-events: none;
-    position: relative;
-}
-
-.loading::after {
-    content: '';
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 20px;
-    height: 20px;
-    margin: -10px 0 0 -10px;
-    border: 2px solid #f3f3f3;
-    border-top: 2px solid #007bff;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-    z-index: 1000;
-}
-
-@keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
-}
-
-@keyframes slideDown {
-    from {
-        opacity: 0;
-        max-height: 0;
-        transform: translateY(-10px);
-    }
-    to {
-        opacity: 1;
-        max-height: 50px;
-        transform: translateY(0);
-    }
-}
-
-/* Delete confirmation modal */
-.modal-danger .modal-header {
-    background-color: #f8d7da;
-    border-color: #f5c6cb;
-}
-
-.modal-danger .modal-title {
-    color: #721c24;
-}
-
-/* Improved button group spacing */
-.btn-group .btn:not(:last-child) {
-    border-right: none;
-}
-
-.btn-group .btn:not(:first-child) {
-    border-left: none;
-}
-
-/* Progress Indicators */
-.transcription-progress-spinner {
-    display: flex;
-    align-items: center;
-    font-size: 12px;
-    color: #0066cc;
-}
-
-.transcription-progress-spinner i {
-    margin-right: 4px;
-}
-
-#fullImageProgressIndicator {
-    margin-bottom: 1rem;
-    border-left: 4px solid #0066cc;
-}
-
-#fullImageProgressIndicator i {
-    color: #0066cc;
-    font-size: 16px;
-}
-
-/* Animated progress indicators */
-@keyframes dash {
-    to {
-        stroke-dashoffset: -20;
-    }
-}
-
-.annotation-progress {
-    animation: dash 1s linear infinite;
-}
-
-/* Zone Color Management Styles */
-.zone-type-item {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 0;
-}
-
-.zone-type-item .form-check {
-    display: flex;
-    align-items: center;
-    flex: 1;
-    margin-bottom: 0;
-}
-
-.zone-type-item .form-check-label {
-    flex: 1;
-    margin-left: 8px;
-}
-
-.zone-color-picker {
-    width: 40px !important;
-    height: 30px !important;
-    border: none !important;
-    border-radius: 4px !important;
-    padding: 0 !important;
-    cursor: pointer;
-    margin-left: 8px;
-}
-
-.zone-color-picker::-webkit-color-swatch-wrapper {
-    padding: 0;
-}
-
-.zone-color-picker::-webkit-color-swatch {
-    border: 1px solid #dee2e6;
-    border-radius: 4px;
-}
-
-.custom-zone-item {
-    background-color: #f8f9fa;
-    padding: 8px;
-    border-radius: 4px;
-    margin: 4px 0;
-}
-
-.custom-zone-controls {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-left: 8px;
-}
-
-.custom-zone-controls .btn-xs {
-    padding: 2px 6px;
-    font-size: 0.75rem;
-    line-height: 1;
-}
-
-.config-group-header {
-    font-weight: bold;
-    margin-top: 15px;
-    margin-bottom: 8px;
-    padding-bottom: 4px;
-    border-bottom: 1px solid #dee2e6;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
-
-.config-group-header:first-child {
-    margin-top: 0;
-}
-
-.config-group-header .btn-xs {
-    padding: 2px 6px;
-    font-size: 0.7rem;
-    line-height: 1.2;
 }
 
 /* Classification Badge Colors */
