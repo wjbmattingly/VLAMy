@@ -2093,18 +2093,45 @@ async ensureMainZonePrompt() {
         let parsedMetadata = {};
         
         try {
-            // First try to extract JSON from text content if it looks like it contains JSON
+            // First try to parse the entire text_content as JSON (for Vertex AI responses)
+            if (textContent.trim().startsWith('{') && textContent.trim().endsWith('}')) {
+                try {
+                    const jsonData = JSON.parse(textContent.trim());
+                    // Handle Vertex AI format: {"text": "", "metadata": {...}}
+                    if (jsonData.hasOwnProperty('text') && jsonData.hasOwnProperty('metadata')) {
+                        textContent = jsonData.text || '';
+                        parsedMetadata = jsonData.metadata || {};
+                        processed.text_content = textContent;
+                        processed.parsed_metadata = parsedMetadata;
+                        return processed;
+                    }
+                    // Handle other formats where only text field exists
+                    else if (jsonData.hasOwnProperty('text')) {
+                        textContent = jsonData.text || '';
+                        processed.text_content = textContent;
+                        return processed;
+                    }
+                } catch (e) {
+                    console.log('Failed to parse text_content as direct JSON:', e);
+                }
+            }
+            
+            // If direct JSON parsing failed, try to extract JSON from text content if it looks like it contains JSON
             if (textContent.includes('{') && textContent.includes('}')) {
                 // Try to extract JSON from markdown code blocks
                 const jsonBlockMatch = textContent.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
                 if (jsonBlockMatch) {
                     try {
                         const jsonData = JSON.parse(jsonBlockMatch[1]);
-                        if (jsonData.text && jsonData.metadata) {
-                            textContent = jsonData.text;
-                            parsedMetadata = jsonData.metadata;
+                        if (jsonData.hasOwnProperty('text') && jsonData.hasOwnProperty('metadata')) {
+                            textContent = jsonData.text || '';
+                            parsedMetadata = jsonData.metadata || {};
                             processed.text_content = textContent;
                             processed.parsed_metadata = parsedMetadata;
+                            return processed;
+                        } else if (jsonData.hasOwnProperty('text')) {
+                            textContent = jsonData.text || '';
+                            processed.text_content = textContent;
                             return processed;
                         }
                     } catch (e) {
@@ -2117,14 +2144,14 @@ async ensureMainZonePrompt() {
                 if (jsonMatch) {
                     try {
                         const jsonData = JSON.parse(jsonMatch[0]);
-                        if (jsonData.text && jsonData.metadata) {
-                            textContent = jsonData.text;
-                            parsedMetadata = jsonData.metadata;
+                        if (jsonData.hasOwnProperty('text') && jsonData.hasOwnProperty('metadata')) {
+                            textContent = jsonData.text || '';
+                            parsedMetadata = jsonData.metadata || {};
                             processed.text_content = textContent;
                             processed.parsed_metadata = parsedMetadata;
                             return processed;
-                        } else if (jsonData.text) {
-                            textContent = jsonData.text;
+                        } else if (jsonData.hasOwnProperty('text')) {
+                            textContent = jsonData.text || '';
                             processed.text_content = textContent;
                             return processed;
                         }
@@ -6248,20 +6275,74 @@ async ensureMainZonePrompt() {
         
         try {
             // First try to parse the entire response as JSON
-            return JSON.parse(responseText);
+            const parsed = JSON.parse(responseText);
+            
+            // Handle Vertex AI format: {"text": "", "metadata": {...}}
+            if (parsed && typeof parsed === 'object' && parsed.hasOwnProperty('text')) {
+                // If it's the Vertex AI format with text and metadata, extract the text content
+                if (parsed.hasOwnProperty('metadata')) {
+                    return {
+                        text_content: parsed.text || '',
+                        metadata: parsed.metadata || {},
+                        original_response: parsed
+                    };
+                }
+                // If it just has text, return the text content
+                return {
+                    text_content: parsed.text || '',
+                    original_response: parsed
+                };
+            }
+            
+            // Return the parsed JSON as-is if it doesn't match expected formats
+            return parsed;
         } catch (e) {
             // If that fails, try to extract JSON from the response
             try {
                 // Look for JSON in markdown code blocks
                 const jsonBlockMatch = responseText.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
                 if (jsonBlockMatch) {
-                    return JSON.parse(jsonBlockMatch[1]);
+                    const parsed = JSON.parse(jsonBlockMatch[1]);
+                    
+                    // Handle Vertex AI format in code blocks
+                    if (parsed && typeof parsed === 'object' && parsed.hasOwnProperty('text')) {
+                        if (parsed.hasOwnProperty('metadata')) {
+                            return {
+                                text_content: parsed.text || '',
+                                metadata: parsed.metadata || {},
+                                original_response: parsed
+                            };
+                        }
+                        return {
+                            text_content: parsed.text || '',
+                            original_response: parsed
+                        };
+                    }
+                    
+                    return parsed;
                 }
                 
                 // Look for plain JSON object
                 const jsonMatch = responseText.match(/\{[\s\S]*?\}/);
                 if (jsonMatch) {
-                    return JSON.parse(jsonMatch[0]);
+                    const parsed = JSON.parse(jsonMatch[0]);
+                    
+                    // Handle Vertex AI format in extracted JSON
+                    if (parsed && typeof parsed === 'object' && parsed.hasOwnProperty('text')) {
+                        if (parsed.hasOwnProperty('metadata')) {
+                            return {
+                                text_content: parsed.text || '',
+                                metadata: parsed.metadata || {},
+                                original_response: parsed
+                            };
+                        }
+                        return {
+                            text_content: parsed.text || '',
+                            original_response: parsed
+                        };
+                    }
+                    
+                    return parsed;
                 }
                 
                 // If no JSON patterns found, return original response
