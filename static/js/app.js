@@ -1080,6 +1080,7 @@ class OCRApp {
                 await this.loadProjects();
             } catch (error) {
                 console.error('Failed to load browser cache mode:', error);
+                this.showLoading(false); // Ensure loading is hidden on error
                 this.showWelcomeScreen();
             }
         } else if (this.authToken) {
@@ -1090,9 +1091,11 @@ class OCRApp {
                 await this.loadProjects();
             } catch (error) {
                 console.error('Failed to load user profile:', error);
+                this.showLoading(false); // Ensure loading is hidden on error
                 this.logout();
             }
         } else {
+            this.showLoading(false); // Ensure loading is hidden
             this.showWelcomeScreen();
         }
     }
@@ -1234,23 +1237,39 @@ class OCRApp {
 
         try {
             this.showLoading(true);
-            const response = await fetch(`${this.apiBaseUrl}/auth/login/`, {
+            const response = await this.fetchWithTimeout(`${this.apiBaseUrl}/auth/login/`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({ username, password })
-            });
+            }, 8000); // 8 second timeout for login
 
             if (response.ok) {
                 const data = await response.json();
                 this.authToken = data.token;
                 localStorage.setItem('authToken', this.authToken);
                 
-                await this.loadUserProfile();
-                this.showAppInterface();
-                await this.loadProjects();
-                this.showAlert('Login successful!', 'success');
+                console.log('Login successful, loading user data...');
+                
+                try {
+                    await this.loadUserProfile();
+                    console.log('User profile loaded');
+                    
+                    await this.loadAnnotationTypes();
+                    console.log('Annotation types loaded');
+                    
+                    this.showAppInterface();
+                    console.log('App interface shown');
+                    
+                    await this.loadProjects();
+                    console.log('Projects loaded');
+                    
+                    this.showAlert('Login successful!', 'success');
+                } catch (initError) {
+                    console.error('Error during post-login initialization:', initError);
+                    this.showAlert('Login succeeded but failed to load data. Please refresh.', 'warning');
+                }
             } else {
                 const error = await response.json();
                 this.showAlert(error.detail || 'Login failed', 'danger');
@@ -1306,11 +1325,11 @@ class OCRApp {
     }
 
     async loadUserProfile() {
-        const response = await fetch(`${this.apiBaseUrl}/auth/profile/`, {
+        const response = await this.fetchWithTimeout(`${this.apiBaseUrl}/auth/profile/`, {
             headers: {
                 'Authorization': `Token ${this.authToken}`
             }
-        });
+        }, 8000); // 8 second timeout
 
         if (response.ok) {
             this.currentUser = await response.json();
@@ -1447,6 +1466,9 @@ class OCRApp {
     }
 
     showAppInterface() {
+        // Ensure loading spinner is hidden when showing app interface
+        this.showLoading(false);
+        
         document.getElementById('welcomeScreen').style.display = 'none';
         document.getElementById('loginScreen').style.display = 'none';
         document.getElementById('registerScreen').style.display = 'none';
@@ -1481,25 +1503,61 @@ class OCRApp {
     }
 
     showLoading(show) {
+        console.log(`Loading spinner ${show ? 'SHOW' : 'HIDE'} called from:`, new Error().stack.split('\n')[2]);
+        
         const spinner = document.getElementById('loadingSpinner');
         if (spinner) {
-            spinner.style.display = show ? 'flex' : 'none';
+            // Use CSS classes instead of inline styles to override !important
+            if (show) {
+                spinner.classList.remove('d-none');
+                spinner.classList.add('d-flex');
+                spinner.style.display = ''; // Clear any inline display style
+                console.log('Loading spinner shown - classes:', spinner.className);
+            } else {
+                spinner.classList.remove('d-flex');
+                spinner.classList.add('d-none');
+                console.log('Loading spinner hidden - classes:', spinner.className);
+            }
+        } else {
+            console.error('Loading spinner element not found!');
         }
         
-        // Auto-clear loading after 10 seconds to prevent stuck loading states
+        // Auto-clear loading after 5 seconds to prevent stuck loading states in server mode
         if (show) {
             if (this.loadingTimeout) {
                 clearTimeout(this.loadingTimeout);
             }
             this.loadingTimeout = setTimeout(() => {
-                console.warn('Loading spinner auto-cleared after timeout');
+                console.warn('Loading spinner auto-cleared after timeout - this may indicate a hanging request');
                 this.showLoading(false);
-            }, 10000);
+                this.showAlert('Operation timed out. Please try again.', 'warning');
+            }, 5000); // Reduced from 10 seconds to 5 seconds
         } else {
             if (this.loadingTimeout) {
                 clearTimeout(this.loadingTimeout);
                 this.loadingTimeout = null;
             }
+        }
+    }
+
+    // Helper method to create fetch requests with timeout
+    async fetchWithTimeout(url, options = {}, timeout = 10000) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeout);
+        
+        try {
+            const response = await fetch(url, {
+                ...options,
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            return response;
+        } catch (error) {
+            clearTimeout(timeoutId);
+            if (error.name === 'AbortError') {
+                throw new Error('Request timed out');
+            }
+            throw error;
         }
     }
 
@@ -2702,11 +2760,11 @@ class OCRApp {
                     return;
                 }
                 
-                const response = await fetch(`${this.apiBaseUrl}/projects/`, {
+                const response = await this.fetchWithTimeout(`${this.apiBaseUrl}/projects/`, {
                     headers: {
                         'Authorization': `Token ${this.authToken}`
                     }
-                });
+                }, 8000); // 8 second timeout
 
                 if (response.ok) {
                     const data = await response.json();
@@ -8071,14 +8129,14 @@ class OCRApp {
             } else {
                 // Server operations need loading spinner
                 this.showLoading(true);
-                const response = await fetch(`${this.apiBaseUrl}/projects/`, {
+                const response = await this.fetchWithTimeout(`${this.apiBaseUrl}/projects/`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': `Token ${this.authToken}`
                     },
                     body: JSON.stringify({ name, description })
-                });
+                }, 8000); // 8 second timeout
 
                 if (response.ok) {
                     const project = await response.json();
@@ -8171,14 +8229,14 @@ class OCRApp {
                 // Server operations need loading spinner
                 this.showLoading(true);
                 
-                const response = await fetch(`${this.apiBaseUrl}/documents/`, {
+                const response = await this.fetchWithTimeout(`${this.apiBaseUrl}/documents/`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': `Token ${this.authToken}`
                     },
                     body: JSON.stringify(requestData)
-                });
+                }, 8000); // 8 second timeout
 
                 if (response.ok) {
                     const newDocument = await response.json();
