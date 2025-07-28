@@ -5234,15 +5234,24 @@ class OCRApp {
 
     async loadStructureData() {
         try {
-            const response = await fetch('/api/projects/', {
-                headers: {
-                    'Authorization': `Token ${localStorage.getItem('authToken')}`
+            if (this.isBrowserCacheMode) {
+                // Load projects from browser cache
+                const projects = await this.localStorage.getAll('projects');
+                // Sort by order
+                projects.sort((a, b) => (a.order || 0) - (b.order || 0));
+                this.renderStructureProjects(projects);
+            } else {
+                // Load projects from server
+                const response = await fetch('/api/projects/', {
+                    headers: {
+                        'Authorization': `Token ${localStorage.getItem('authToken')}`
+                    }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    this.renderStructureProjects(data.results);
                 }
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                this.renderStructureProjects(data.results);
             }
         } catch (error) {
             console.error('Error loading structure data:', error);
@@ -5286,15 +5295,24 @@ class OCRApp {
         
         // Load documents for this project
         try {
-            const response = await fetch(`/api/documents/?project=${projectId}`, {
-                headers: {
-                    'Authorization': `Token ${localStorage.getItem('authToken')}`
+            if (this.isBrowserCacheMode) {
+                // Load documents from browser cache
+                const documents = await this.localStorage.getAll('documents', 'project_id', projectId);
+                // Sort by reading_order
+                documents.sort((a, b) => (a.reading_order || 0) - (b.reading_order || 0));
+                this.renderStructureDocuments(documents, projectId);
+            } else {
+                // Load documents from server
+                const response = await fetch(`/api/documents/?project=${projectId}`, {
+                    headers: {
+                        'Authorization': `Token ${localStorage.getItem('authToken')}`
+                    }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    this.renderStructureDocuments(data.results, projectId);
                 }
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                this.renderStructureDocuments(data.results, projectId);
             }
         } catch (error) {
             console.error('Error loading documents:', error);
@@ -5350,15 +5368,24 @@ class OCRApp {
         
         // Load images for this document
         try {
-            const response = await fetch(`/api/images/?document=${documentId}&_t=${Date.now()}`, {
-                headers: {
-                    'Authorization': `Token ${localStorage.getItem('authToken')}`
+            if (this.isBrowserCacheMode) {
+                // Load images from browser cache
+                const images = await this.localStorage.getAll('images', 'document_id', documentId);
+                // Sort by order
+                images.sort((a, b) => (a.order || 0) - (b.order || 0));
+                this.renderStructureImages(images, documentId);
+            } else {
+                // Load images from server
+                const response = await fetch(`/api/images/?document=${documentId}&_t=${Date.now()}`, {
+                    headers: {
+                        'Authorization': `Token ${localStorage.getItem('authToken')}`
+                    }
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    this.renderStructureImages(data.results, documentId);
                 }
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                this.renderStructureImages(data.results, documentId);
             }
         } catch (error) {
             console.error('Error loading images:', error);
@@ -5589,19 +5616,31 @@ class OCRApp {
 
     async loadProjectsForMove(excludeDocumentId) {
         try {
-            const response = await fetch('/api/projects/', {
-                headers: { 'Authorization': `Token ${localStorage.getItem('authToken')}` }
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                const select = document.getElementById('targetProjectSelect');
-                select.innerHTML = '<option value="">Select a project...</option>';
-                
-                data.results.forEach(project => {
-                    select.innerHTML += `<option value="${project.id}">${project.name}</option>`;
+            let projects;
+            if (this.isBrowserCacheMode) {
+                // Load projects from browser cache
+                projects = await this.localStorage.getAll('projects');
+                projects.sort((a, b) => (a.order || 0) - (b.order || 0));
+            } else {
+                // Load projects from server
+                const response = await fetch('/api/projects/', {
+                    headers: { 'Authorization': `Token ${localStorage.getItem('authToken')}` }
                 });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    projects = data.results;
+                } else {
+                    throw new Error('Failed to load projects');
+                }
             }
+            
+            const select = document.getElementById('targetProjectSelect');
+            select.innerHTML = '<option value="">Select a project...</option>';
+            
+            projects.forEach(project => {
+                select.innerHTML += `<option value="${project.id}">${project.name}</option>`;
+            });
         } catch (error) {
             console.error('Error loading projects:', error);
         }
@@ -5609,19 +5648,31 @@ class OCRApp {
 
     async loadProjectsForImageMove() {
         try {
-            const response = await fetch('/api/projects/', {
-                headers: { 'Authorization': `Token ${localStorage.getItem('authToken')}` }
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                const select = document.getElementById('targetProjectSelectForImage');
-                select.innerHTML = '<option value="">Select a project...</option>';
-                
-                data.results.forEach(project => {
-                    select.innerHTML += `<option value="${project.id}">${project.name}</option>`;
+            let projects;
+            if (this.isBrowserCacheMode) {
+                // Load projects from browser cache
+                projects = await this.localStorage.getAll('projects');
+                projects.sort((a, b) => (a.order || 0) - (b.order || 0));
+            } else {
+                // Load projects from server
+                const response = await fetch('/api/projects/', {
+                    headers: { 'Authorization': `Token ${localStorage.getItem('authToken')}` }
                 });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    projects = data.results;
+                } else {
+                    throw new Error('Failed to load projects');
+                }
             }
+            
+            const select = document.getElementById('targetProjectSelectForImage');
+            select.innerHTML = '<option value="">Select a project...</option>';
+            
+            projects.forEach(project => {
+                select.innerHTML += `<option value="${project.id}">${project.name}</option>`;
+            });
         } catch (error) {
             console.error('Error loading projects:', error);
         }
@@ -5637,20 +5688,32 @@ class OCRApp {
         }
         
         try {
-            const response = await fetch(`/api/documents/?project=${projectId}`, {
-                headers: { 'Authorization': `Token ${localStorage.getItem('authToken')}` }
-            });
-            
-            if (response.ok) {
-                const data = await response.json();
-                select.innerHTML = '<option value="">Select a document...</option>';
-                
-                data.results.forEach(doc => {
-                    select.innerHTML += `<option value="${doc.id}">${doc.name}</option>`;
+            let documents;
+            if (this.isBrowserCacheMode) {
+                // Load documents from browser cache
+                documents = await this.localStorage.getAll('documents', 'project_id', projectId);
+                documents.sort((a, b) => (a.reading_order || 0) - (b.reading_order || 0));
+            } else {
+                // Load documents from server
+                const response = await fetch(`/api/documents/?project=${projectId}`, {
+                    headers: { 'Authorization': `Token ${localStorage.getItem('authToken')}` }
                 });
                 
-                select.disabled = false;
+                if (response.ok) {
+                    const data = await response.json();
+                    documents = data.results;
+                } else {
+                    throw new Error('Failed to load documents');
+                }
             }
+            
+            select.innerHTML = '<option value="">Select a document...</option>';
+            
+            documents.forEach(doc => {
+                select.innerHTML += `<option value="${doc.id}">${doc.name}</option>`;
+            });
+            
+            select.disabled = false;
         } catch (error) {
             console.error('Error loading documents:', error);
         }
