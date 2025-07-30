@@ -2533,7 +2533,9 @@ class OCRApp {
 
             const annotationData = {
                 image_id: this.currentImage.id,
+                image: this.currentImage.id, // Add both fields for compatibility
                 annotation_type: type,
+                type: type, // Add both type fields for compatibility
                 coordinates: coordinates,
                 classification: this.currentClassification || null,
                 label: '',
@@ -3594,16 +3596,20 @@ class OCRApp {
         let imageSrc;
         if (this.isBrowserCacheMode) {
             // Get image from IndexedDB - handle both field names for backwards compatibility
-            const imageId = annotation.image_id || annotation.image;
-            if (!imageId) {
-                throw new Error('Annotation has no image reference');
+            let imageId = annotation.image_id || annotation.image;
+            
+            // If no image reference, try to use current image ID (fallback for annotations without proper references)
+            if (!imageId && this.currentImage) {
+                console.warn('Annotation missing image reference, using current image as fallback:', annotation.id);
+                imageId = this.currentImage.id;
             }
             
-
+            if (!imageId) {
+                throw new Error('Annotation has no image reference and no current image available');
+            }
             
             const image = await this.localStorage.get('images', imageId);
             if (!image || !image.image_data) {
-
                 // Try to find the image by looking at current document images
                 if (this.currentImage && this.currentImage.document_id) {
                     const documentImages = await this.localStorage.getAll('images', 'document_id', this.currentImage.document_id);
@@ -3611,15 +3617,19 @@ class OCRApp {
                     // If annotation has no valid image reference but we're in a single-image context, use current image
                     if (documentImages.length === 1 || (this.currentImage && documentImages.find(img => img.id === this.currentImage.id))) {
                         imageSrc = this.currentImage.image_data || this.currentImage.image_file;
-                        if (imageSrc) {
-                            return imageSrc;
+                        if (!imageSrc) {
+                            throw new Error('Current image has no image data available');
                         }
+                        // Continue processing with current image data instead of returning early
+                    } else {
+                        throw new Error(`Image not found in cache: ${imageId}`);
                     }
+                } else {
+                    throw new Error(`Image not found in cache: ${imageId}`);
                 }
-                
-                throw new Error(`Image not found in cache: ${imageId}`);
+            } else {
+                imageSrc = image.image_data;
             }
-            imageSrc = image.image_data;
         } else {
             // Use current image file from server
             if (!this.currentImage || !this.currentImage.image_file) {
@@ -3635,8 +3645,9 @@ class OCRApp {
         return new Promise((resolve, reject) => {
             imgElement.onload = () => {
                 const coords = annotation.coordinates;
+                const annotationType = annotation.annotation_type || annotation.type;
                 
-                if (annotation.type === 'bbox') {
+                if (annotationType === 'bbox') {
                     canvas.width = coords.width;
                     canvas.height = coords.height;
                     
@@ -3646,7 +3657,7 @@ class OCRApp {
                         coords.x, coords.y, coords.width, coords.height,
                         0, 0, coords.width, coords.height
                     );
-                } else if (annotation.type === 'polygon') {
+                } else if (annotationType === 'polygon') {
                     // For polygons, find bounding box
                     const xs = coords.points.map(p => p.x);
                     const ys = coords.points.map(p => p.y);
@@ -8309,7 +8320,9 @@ class OCRApp {
                 const localAnnotation = {
                     id: tempId,
                     type: 'bbox',
-                    image_id: this.currentImage.id, // Add image reference for consistency
+                    annotation_type: 'bbox', // Add both type fields for compatibility
+                    image_id: this.currentImage.id,
+                    image: this.currentImage.id, // Add both image fields for compatibility
                     fabricObject: rect,
                     coordinates: coords, // Store original image coordinates
                     classification: classification,
@@ -8327,9 +8340,11 @@ class OCRApp {
                 rect.annotationId = tempId;
 
                                 // Save to database or local storage
-const annotationData = {
+                const annotationData = {
                     image_id: this.currentImage.id,
+                    image: this.currentImage.id, // Add both fields for compatibility
                     annotation_type: 'bbox',
+                    type: 'bbox', // Add both type fields for compatibility
                     coordinates: coords, // Use original image coordinates
                     classification: classification,
                     label: `${formattedClass} (${Math.round(confidence * 100)}%)`,
@@ -12362,26 +12377,7 @@ const annotationData = {
         return false;
     }
 
-    getPromptForAnnotation(annotation) {
-        const annotationType = annotation.annotation_type || annotation.type;
-        const customPrompts = this.userProfile?.custom_prompts || [];
-        
-        // Find matching prompt for this annotation type
-        for (const promptObj of customPrompts) {
-            if (promptObj.zones && promptObj.zones.includes(annotationType)) {
-                return {
-                    prompt: promptObj.prompt,
-                    metadata_fields: promptObj.metadata_fields || []
-                };
-            }
-        }
-        
-        // Default prompt if no custom prompt found
-        return {
-            prompt: 'Transcribe the text in this image region accurately.',
-            metadata_fields: []
-        };
-    }
+
 
     createMetadataSchema(metadataFields) {
         const properties = {
