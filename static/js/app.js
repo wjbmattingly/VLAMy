@@ -11927,29 +11927,45 @@ class OCRApp {
         this.showProgressModal('Detecting Zones', `Starting zone detection for project (${mode === 'all' ? 'all pages' : 'unannotated pages only'})...`);
 
         try {
-            // Get all documents in the project
-            const docsResponse = await fetch(`${this.apiBaseUrl}/documents/?project=${projectId}`, {
-                headers: { 'Authorization': `Token ${this.authToken}` }
-            });
-            
-            if (!docsResponse.ok) throw new Error('Failed to load project documents');
-            const documents = await docsResponse.json();
-
+            let documents;
             let totalImages = 0;
             let allImages = [];
-
-            // Collect all images
-            for (const doc of documents.results) {
-                const imagesResponse = await fetch(`${this.apiBaseUrl}/images/?document=${doc.id}`, {
+            
+            if (this.isBrowserCacheMode) {
+                // Get all documents for this project from IndexedDB
+                const allDocs = await this.localStorage.getAll('documents', 'project_id', projectId);
+                documents = { results: allDocs };
+                
+                // Collect all images for these documents
+                for (const doc of documents.results) {
+                    const images = await this.localStorage.getAll('images', 'document_id', doc.id);
+                    images.forEach(image => {
+                        allImages.push({ ...image, documentId: doc.id, documentName: doc.name });
+                    });
+                    totalImages += images.length;
+                }
+            } else {
+                // Get all documents in the project from server
+                const docsResponse = await fetch(`${this.apiBaseUrl}/documents/?project=${projectId}`, {
                     headers: { 'Authorization': `Token ${this.authToken}` }
                 });
                 
-                if (imagesResponse.ok) {
-                    const images = await imagesResponse.json();
-                    images.results.forEach(image => {
-                        allImages.push({ ...image, documentId: doc.id, documentName: doc.name });
+                if (!docsResponse.ok) throw new Error('Failed to load project documents');
+                documents = await docsResponse.json();
+
+                // Collect all images
+                for (const doc of documents.results) {
+                    const imagesResponse = await fetch(`${this.apiBaseUrl}/images/?document=${doc.id}`, {
+                        headers: { 'Authorization': `Token ${this.authToken}` }
                     });
-                    totalImages += images.results.length;
+                    
+                    if (imagesResponse.ok) {
+                        const images = await imagesResponse.json();
+                        images.results.forEach(image => {
+                            allImages.push({ ...image, documentId: doc.id, documentName: doc.name });
+                        });
+                        totalImages += images.results.length;
+                    }
                 }
             }
 
@@ -11967,16 +11983,27 @@ class OCRApp {
 
                     // Check if we should skip this image
                     if (mode === 'unannotated') {
-                        const annotationsResponse = await fetch(`${this.apiBaseUrl}/annotations/?image=${image.id}`, {
-                            headers: { 'Authorization': `Token ${this.authToken}` }
-                        });
-                        if (annotationsResponse.ok) {
-                            const annotations = await annotationsResponse.json();
-                            if (annotations.results && annotations.results.length > 0) {
-                                this.addProgressItem(image.name, 'skipped', 'Already has annotations');
-                                processedImages++;
-                                continue;
+                        let hasAnnotations = false;
+                        
+                        if (this.isBrowserCacheMode) {
+                            // Check annotations in IndexedDB
+                            const annotations = await this.localStorage.getAll('annotations', 'image_id', image.id);
+                            hasAnnotations = annotations && annotations.length > 0;
+                        } else {
+                            // Check annotations on server
+                            const annotationsResponse = await fetch(`${this.apiBaseUrl}/annotations/?image=${image.id}`, {
+                                headers: { 'Authorization': `Token ${this.authToken}` }
+                            });
+                            if (annotationsResponse.ok) {
+                                const annotations = await annotationsResponse.json();
+                                hasAnnotations = annotations.results && annotations.results.length > 0;
                             }
+                        }
+                        
+                        if (hasAnnotations) {
+                            this.addProgressItem(image.name, 'skipped', 'Already has annotations');
+                            processedImages++;
+                            continue;
                         }
                     }
 
@@ -12023,13 +12050,21 @@ class OCRApp {
         this.showProgressModal('Detecting Zones', `Starting zone detection for document (${mode === 'all' ? 'all pages' : 'unannotated pages only'})...`);
 
         try {
-            // Get all images in the document
-            const imagesResponse = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}`, {
-                headers: { 'Authorization': `Token ${this.authToken}` }
-            });
+            let images;
             
-            if (!imagesResponse.ok) throw new Error('Failed to load document images');
-            const images = await imagesResponse.json();
+            if (this.isBrowserCacheMode) {
+                // Get all images for this document from IndexedDB
+                const allImages = await this.localStorage.getAll('images', 'document_id', documentId);
+                images = { results: allImages };
+            } else {
+                // Get all images in the document from server
+                const imagesResponse = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}`, {
+                    headers: { 'Authorization': `Token ${this.authToken}` }
+                });
+                
+                if (!imagesResponse.ok) throw new Error('Failed to load document images');
+                images = await imagesResponse.json();
+            }
 
             const totalImages = images.results.length;
             this.updateProgress(0, totalImages, 'Initialized', `Found ${totalImages} images to process`);
@@ -12046,16 +12081,27 @@ class OCRApp {
 
                     // Check if we should skip this image
                     if (mode === 'unannotated') {
-                        const annotationsResponse = await fetch(`${this.apiBaseUrl}/annotations/?image=${image.id}`, {
-                            headers: { 'Authorization': `Token ${this.authToken}` }
-                        });
-                        if (annotationsResponse.ok) {
-                            const annotations = await annotationsResponse.json();
-                            if (annotations.results && annotations.results.length > 0) {
-                                this.addProgressItem(image.name, 'skipped', 'Already has annotations');
-                                processedImages++;
-                                continue;
+                        let hasAnnotations = false;
+                        
+                        if (this.isBrowserCacheMode) {
+                            // Check annotations in IndexedDB
+                            const annotations = await this.localStorage.getAll('annotations', 'image_id', image.id);
+                            hasAnnotations = annotations && annotations.length > 0;
+                        } else {
+                            // Check annotations on server
+                            const annotationsResponse = await fetch(`${this.apiBaseUrl}/annotations/?image=${image.id}`, {
+                                headers: { 'Authorization': `Token ${this.authToken}` }
+                            });
+                            if (annotationsResponse.ok) {
+                                const annotations = await annotationsResponse.json();
+                                hasAnnotations = annotations.results && annotations.results.length > 0;
                             }
+                        }
+                        
+                        if (hasAnnotations) {
+                            this.addProgressItem(image.name, 'skipped', 'Already has annotations');
+                            processedImages++;
+                            continue;
                         }
                     }
 
@@ -12099,29 +12145,127 @@ class OCRApp {
 
     async detectZonesForImage(imageId, credentials, clearExisting = false, selectedZones = [], selectedLines = [], useFiltering = false) {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/images/${imageId}/detect-zones-lines/`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Token ${this.authToken}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    roboflow_api_key: credentials.roboflow_api_key,
-                    filter_selected_types: useFiltering,
-                    clear_existing: clearExisting,
-                    selected_zone_types: selectedZones,
-                    selected_line_types: selectedLines,
-                    apply_mappings: true // Always apply detection mappings
-                })
-            });
+            if (this.isBrowserCacheMode) {
+                // Use client-side detection for browser cache mode
+                const confidenceThreshold = 0.4; // Default threshold
+                
+                // Get the image data
+                const image = await this.localStorage.get('images', imageId);
+                if (!image) {
+                    return { success: false, count: 0, error: 'Image not found' };
+                }
+                
+                // Perform client-side detection using the same logic as startZoneLineDetectionBrowserCache
+                const response = await fetch('https://serverless.roboflow.com/infer/workflows/yale-ai/page-xml', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        api_key: 'gcV24jJosN6XtPnBp7x1',
+                        inputs: {
+                            "image": {"type": "base64", "value": image.image_file}
+                        }
+                    })
+                });
 
-            const result = await response.json();
+                if (!response.ok) {
+                    return { success: false, count: 0, error: `Detection API error: ${response.status}` };
+                }
 
-            if (response.ok && result.detections && result.detections.detections) {
-                return { success: true, count: result.detections.detections.length };
+                const result = await response.json();
+                
+                // Process the results using the same logic as browser cache mode
+                let detections = [];
+                
+                if (result && result.outputs && result.outputs.length > 0) {
+                    const output = result.outputs[0];
+                    if (output.predictions && output.predictions.predictions) {
+                        detections = output.predictions.predictions
+                            .filter(pred => pred.confidence >= confidenceThreshold)
+                            .map(pred => ({
+                                coordinates: {
+                                    x: pred.x - pred.width / 2,
+                                    y: pred.y - pred.height / 2,
+                                    width: pred.width,
+                                    height: pred.height
+                                },
+                                classification: pred.class || pred.class_name || 'detected_region',
+                                confidence: pred.confidence,
+                                original_class: pred.class || pred.class_name || 'detected_region'
+                            }));
+                    }
+                }
+
+                // Filter by selected types if filtering is enabled
+                if (useFiltering && (selectedZones.length > 0 || selectedLines.length > 0)) {
+                    const allowedTypes = [...selectedZones, ...selectedLines];
+                    detections = detections.filter(det => 
+                        allowedTypes.includes(det.classification) || 
+                        allowedTypes.includes(det.original_class)
+                    );
+                }
+
+                // Clear existing annotations if requested
+                if (clearExisting) {
+                    const existingAnnotations = await this.localStorage.getAll('annotations', 'image_id', imageId);
+                    for (const annotation of existingAnnotations) {
+                        await this.localStorage.delete('annotations', annotation.id);
+                    }
+                }
+
+                // Save detected annotations to IndexedDB
+                let savedCount = 0;
+                for (const detection of detections) {
+                    try {
+                        const annotationData = {
+                            image_id: imageId,
+                            annotation_type: 'bbox',
+                            coordinates: detection.coordinates,
+                            classification: detection.classification,
+                            label: `${detection.classification} (${Math.round(detection.confidence * 100)}%)`,
+                            reading_order: savedCount,
+                            metadata: {
+                                confidence: detection.confidence,
+                                original_class: detection.original_class,
+                                detected_by: 'roboflow'
+                            }
+                        };
+                        
+                        await this.localStorage.add('annotations', annotationData);
+                        savedCount++;
+                    } catch (error) {
+                        console.error('Failed to save detected annotation:', error);
+                    }
+                }
+
+                return { success: true, count: savedCount };
             } else {
-                console.error(`Detection failed for image ${imageId}:`, result.error || 'Unknown error');
-                return { success: false, count: 0, error: result.error || 'Unknown error' };
+                // Use server-side detection for normal mode
+                const response = await fetch(`${this.apiBaseUrl}/images/${imageId}/detect-zones-lines/`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Token ${this.authToken}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        roboflow_api_key: credentials.roboflow_api_key,
+                        filter_selected_types: useFiltering,
+                        clear_existing: clearExisting,
+                        selected_zone_types: selectedZones,
+                        selected_line_types: selectedLines,
+                        apply_mappings: true // Always apply detection mappings
+                    })
+                });
+
+                const result = await response.json();
+
+                if (response.ok && result.detections && result.detections.detections) {
+                    return { success: true, count: result.detections.detections.length };
+                } else {
+                    console.error(`Detection failed for image ${imageId}:`, result.error || 'Unknown error');
+                    return { success: false, count: 0, error: result.error || 'Unknown error' };
+                }
             }
         } catch (error) {
             console.error(`Error detecting zones for image ${imageId}:`, error);
