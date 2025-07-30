@@ -4246,8 +4246,14 @@ class OCRApp {
                                                 </div>
                                             </div>
                                         ` : `
-                                            <div class="small text-muted not-transcribed">
+                                            <div class="small text-muted not-transcribed" id="transcription-display-${annotation.id}">
                                                 <i class="fas fa-robot me-1"></i>Not transcribed yet
+                                            </div>
+                                            
+                                            <!-- Manual transcription form (hidden by default) -->
+                                            <div class="transcription-edit-form" id="transcription-edit-${annotation.id}" style="display: none;">
+                                                <label class="form-label small">Add Transcription:</label>
+                                                <textarea class="form-control form-control-sm" id="transcription-textarea-${annotation.id}" rows="8" placeholder="Type the transcription here..."></textarea>
                                             </div>
                                             
                                             <!-- Save buttons for non-transcribed annotations in edit mode -->
@@ -6153,7 +6159,15 @@ class OCRApp {
         // Allow empty transcriptions (user might want to clear it)
         try {
             const annotation = this.annotations.find(a => a.id === annotationId);
-            if (annotation && annotation.transcription) {
+            if (!annotation) return true;
+            
+            // If no text provided, don't create/update anything
+            if (!newText) {
+                return true;
+            }
+            
+            if (annotation.transcription) {
+                // Update existing transcription
                 if (this.isBrowserCacheMode) {
                     // Update transcription in browser cache
                     try {
@@ -6194,11 +6208,88 @@ class OCRApp {
                         return false;
                     }
                 }
+            } else {
+                // Create new transcription
+                return await this.createManualTranscription(annotationId, newText);
             }
-            return true; // No transcription to update
+            return true;
         } catch (error) {
             console.error('Error updating transcription:', error);
             this.showAlert('Error updating transcription', 'danger');
+            return false;
+        }
+    }
+
+    async createManualTranscription(annotationId, textContent) {
+        try {
+            const annotation = this.annotations.find(a => a.id === annotationId);
+            if (!annotation) return false;
+
+            if (this.isBrowserCacheMode) {
+                // Create transcription in browser cache
+                const transcriptionData = {
+                    image: this.currentImage.id,
+                    annotation: annotationId,
+                    transcription_type: 'annotation',
+                    api_endpoint: 'manual',
+                    api_model: 'manual_entry',
+                    status: 'completed',
+                    text_content: textContent,
+                    confidence_score: null,
+                    api_response_raw: null,
+                    is_current: true,
+                    created_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString()
+                };
+
+                const savedTranscription = await this.localStorage.add('transcriptions', transcriptionData);
+                
+                // Update annotation with new transcription
+                annotation.transcription = savedTranscription;
+                
+                return true;
+            } else {
+                // Create transcription on server via annotation update (more reliable than direct transcription creation)
+                try {
+                    const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
+                        method: 'PATCH',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Token ${this.authToken}`
+                        },
+                        body: JSON.stringify({
+                            manual_transcription: textContent
+                        })
+                    });
+                    
+                    if (response.ok) {
+                        // Create a local transcription object for the UI
+                        const localTranscription = {
+                            id: `manual_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                            text_content: textContent,
+                            api_endpoint: 'manual',
+                            api_model: 'manual_entry',
+                            status: 'completed',
+                            created_at: new Date().toISOString(),
+                            updated_at: new Date().toISOString()
+                        };
+                        annotation.transcription = localTranscription;
+                        return true;
+                    } else {
+                        const errorText = await response.text();
+                        console.error('Failed to save manual transcription:', errorText);
+                        this.showAlert('Failed to save transcription', 'danger');
+                        return false;
+                    }
+                } catch (error) {
+                    console.error('Error saving manual transcription:', error);
+                    this.showAlert('Error saving transcription', 'danger');
+                    return false;
+                }
+            }
+        } catch (error) {
+            console.error('Error creating manual transcription:', error);
+            this.showAlert('Error creating transcription', 'danger');
             return false;
         }
     }
@@ -6211,8 +6302,13 @@ class OCRApp {
             // Reset textarea to original value
             const textarea = document.getElementById(`transcription-textarea-${annotationId}`);
             const annotation = this.annotations.find(a => a.id === annotationId);
-            if (textarea && annotation && annotation.transcription) {
-                textarea.value = annotation.transcription.text_content;
+            if (textarea) {
+                if (annotation && annotation.transcription) {
+                    textarea.value = annotation.transcription.text_content;
+                } else {
+                    // Clear textarea for annotations without transcriptions
+                    textarea.value = '';
+                }
             }
             
             // Only hide/show if not in inline editing mode
@@ -6454,8 +6550,9 @@ class OCRApp {
             if (transcriptionDisplay) transcriptionDisplay.style.display = 'none';
             if (transcriptionEdit) {
                 transcriptionEdit.style.display = 'block';
-            } else if (editButtons) {
-                // Show save buttons for annotations without transcription
+            }
+            if (editButtons) {
+                // Show save buttons for all annotations in edit mode
                 editButtons.style.display = 'block';
             }
             
