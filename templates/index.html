@@ -501,6 +501,14 @@
                             <label for="openaiApiKey" class="form-label">OpenAI API Key</label>
                             <input type="password" class="form-control" id="openaiApiKey" placeholder="sk-...">
                             <div class="form-text">Used for GPT-4 Vision transcription</div>
+                            
+                            <div class="form-check mt-2">
+                                <input class="form-check-input" type="checkbox" id="enableBatchProcessing" checked>
+                                <label class="form-check-label" for="enableBatchProcessing">
+                                    <strong>Enable Batch Processing</strong>
+                                    <small class="text-muted d-block">Use OpenAI's Batch API for bulk transcription (50% cost savings, ~24h processing time)</small>
+                                </label>
+                            </div>
                         </div>
                         
                         <div class="col-12 mb-3">

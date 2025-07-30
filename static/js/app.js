@@ -959,7 +959,7 @@ class OCRApp {
             
             // Check for current image annotations
             if (this.currentImage) {
-                const imageAnnotations = await this.localStorage.getAll('annotations', 'image_id', this.currentImage.id);
+                const imageAnnotations = await this.getAnnotationsForImage(this.currentImage.id);
                 console.log(`Annotations for current image (${this.currentImage.id}):`, imageAnnotations.length, imageAnnotations);
             }
         } catch (error) {
@@ -2511,6 +2511,7 @@ class OCRApp {
         const localAnnotation = {
             id: tempId,
             type: type,
+            image_id: this.currentImage.id, // Add image reference for consistency
             fabricObject: fabricObject,
             coordinates: coordinates,
             classification: this.currentClassification || null,
@@ -2548,8 +2549,12 @@ class OCRApp {
                 const annotationIndex = this.annotations.findIndex(a => a.id === tempId);
                 if (annotationIndex !== -1) {
                     this.annotations[annotationIndex].id = savedAnnotation.id;
+                    this.annotations[annotationIndex].image_id = savedAnnotation.image_id; // Preserve image reference
+                    this.annotations[annotationIndex].annotation_type = savedAnnotation.annotation_type; // Preserve type field
                     this.annotations[annotationIndex].reading_order = savedAnnotation.reading_order;
                     this.annotations[annotationIndex].classification = savedAnnotation.classification;
+                    this.annotations[annotationIndex].created_at = savedAnnotation.created_at;
+                    this.annotations[annotationIndex].updated_at = savedAnnotation.updated_at;
                     fabricObject.annotationId = savedAnnotation.id;
                     
                     // Update the annotation list to reflect the new annotation
@@ -2578,8 +2583,12 @@ class OCRApp {
                     const annotationIndex = this.annotations.findIndex(a => a.id === tempId);
                     if (annotationIndex !== -1) {
                         this.annotations[annotationIndex].id = savedAnnotation.id;
+                        this.annotations[annotationIndex].image = savedAnnotation.image; // Server uses 'image' field
+                        this.annotations[annotationIndex].annotation_type = savedAnnotation.annotation_type;
                         this.annotations[annotationIndex].reading_order = savedAnnotation.reading_order;
                         this.annotations[annotationIndex].classification = savedAnnotation.classification;
+                        this.annotations[annotationIndex].created_at = savedAnnotation.created_at;
+                        this.annotations[annotationIndex].updated_at = savedAnnotation.updated_at;
                         fabricObject.annotationId = savedAnnotation.id;
                         
                         // Update the annotation list to reflect the new annotation
@@ -3254,7 +3263,7 @@ class OCRApp {
 
             if (this.isBrowserCacheMode) {
                 // Handle full image transcription locally for browser cache mode
-                const transcription = await this.performLocalImageTranscription(requestData);
+                const transcription = await this.performLocalImageTranscription(this.currentImage.id, requestData);
                 if (transcription) {
                     // Store transcription in local storage
                     const transcriptionData = {
@@ -3428,6 +3437,28 @@ class OCRApp {
         }
     }
 
+    async performLocalTranscriptionWithImage(annotation, requestData, imageData) {
+        // Version that accepts image data directly to avoid cache lookup issues
+        try {
+            // Get the image region for the annotation using provided image data
+            const imageCanvas = await this.getAnnotationImageDataFromImage(annotation, imageData);
+            
+            if (requestData.api_endpoint === 'openai') {
+                return await this.transcribeWithOpenAI(imageCanvas, requestData);
+            } else if (requestData.api_endpoint === 'vertex') {
+                return await this.transcribeWithVertexAI(imageCanvas, requestData);
+            } else if (requestData.api_endpoint === 'custom') {
+                return await this.transcribeWithCustomEndpoint(imageCanvas, requestData);
+            }
+            
+            throw new Error('Unsupported API endpoint');
+        } catch (error) {
+            console.error('Local transcription error:', error);
+            this.showAlert(`Transcription failed: ${error.message}`, 'danger');
+            return null;
+        }
+    }
+
     async performLocalTranscription(annotation, requestData) {
         try {
             // Get the image region for the annotation
@@ -3449,14 +3480,157 @@ class OCRApp {
         }
     }
 
+    async getAnnotationImageDataFromImage(annotation, imageData) {
+        // Version that accepts image data directly to avoid cache lookup issues
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Use provided image data
+        const imageSrc = imageData.image_data || imageData.image_file;
+        if (!imageSrc) {
+            throw new Error('No image data provided');
+        }
+        
+
+        
+        // Get the image element
+        const imgElement = new Image();
+        imgElement.src = imageSrc;
+        
+        return new Promise((resolve, reject) => {
+            imgElement.onload = () => {
+                const coords = annotation.coordinates;
+                const annotationType = annotation.type || annotation.annotation_type;
+                
+
+                
+                if (!coords) {
+                    reject(new Error('No coordinates found for annotation'));
+                    return;
+                }
+                
+                if (annotationType === 'bbox') {
+                    // Ensure coordinates are valid
+                    const x = Math.max(0, Math.floor(coords.x || 0));
+                    const y = Math.max(0, Math.floor(coords.y || 0));
+                    const width = Math.max(1, Math.floor(coords.width || 0));
+                    const height = Math.max(1, Math.floor(coords.height || 0));
+                    
+                    // Make sure crop doesn't exceed image bounds
+                    const actualWidth = Math.min(width, imgElement.width - x);
+                    const actualHeight = Math.min(height, imgElement.height - y);
+                    
+                    if (actualWidth <= 0 || actualHeight <= 0) {
+                        reject(new Error(`Invalid crop dimensions: ${actualWidth}x${actualHeight} at ${x},${y}`));
+                        return;
+                    }
+                    
+                    canvas.width = actualWidth;
+                    canvas.height = actualHeight;
+                    
+
+                    
+                    // Draw the cropped region
+                    ctx.drawImage(
+                        imgElement,
+                        x, y, actualWidth, actualHeight,
+                        0, 0, actualWidth, actualHeight
+                    );
+                } else if (annotationType === 'polygon') {
+                    // For polygons, find bounding box
+                    if (!coords.points || coords.points.length === 0) {
+                        reject(new Error('No points found for polygon annotation'));
+                        return;
+                    }
+                    
+                    const xs = coords.points.map(p => p.x);
+                    const ys = coords.points.map(p => p.y);
+                    const minX = Math.max(0, Math.floor(Math.min(...xs)));
+                    const minY = Math.max(0, Math.floor(Math.min(...ys)));
+                    const maxX = Math.min(imgElement.width, Math.ceil(Math.max(...xs)));
+                    const maxY = Math.min(imgElement.height, Math.ceil(Math.max(...ys)));
+                    
+                    const width = maxX - minX;
+                    const height = maxY - minY;
+                    
+                    if (width <= 0 || height <= 0) {
+                        reject(new Error(`Invalid polygon bounds: ${width}x${height}`));
+                        return;
+                    }
+                    
+                    canvas.width = width;
+                    canvas.height = height;
+                    
+
+                    
+                    // Draw the bounding box region
+                    ctx.drawImage(
+                        imgElement,
+                        minX, minY, width, height,
+                        0, 0, width, height
+                    );
+                } else {
+                    reject(new Error(`Unsupported annotation type: ${annotationType}`));
+                    return;
+                }
+                
+                const croppedDataUrl = canvas.toDataURL('image/png');
+                resolve(croppedDataUrl);
+            };
+            
+            imgElement.onerror = (error) => {
+                console.error('Failed to load image for annotation extraction:', error);
+                reject(error);
+            };
+        });
+    }
+
     async getAnnotationImageData(annotation) {
         // Create a canvas to extract the annotation region from the current image
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
         
-        // Get the current image element
+        // Get the image data - different approach for browser cache vs server mode
+        let imageSrc;
+        if (this.isBrowserCacheMode) {
+            // Get image from IndexedDB - handle both field names for backwards compatibility
+            const imageId = annotation.image_id || annotation.image;
+            if (!imageId) {
+                throw new Error('Annotation has no image reference');
+            }
+            
+
+            
+            const image = await this.localStorage.get('images', imageId);
+            if (!image || !image.image_data) {
+
+                // Try to find the image by looking at current document images
+                if (this.currentImage && this.currentImage.document_id) {
+                    const documentImages = await this.localStorage.getAll('images', 'document_id', this.currentImage.document_id);
+                    
+                    // If annotation has no valid image reference but we're in a single-image context, use current image
+                    if (documentImages.length === 1 || (this.currentImage && documentImages.find(img => img.id === this.currentImage.id))) {
+                        imageSrc = this.currentImage.image_data || this.currentImage.image_file;
+                        if (imageSrc) {
+                            return imageSrc;
+                        }
+                    }
+                }
+                
+                throw new Error(`Image not found in cache: ${imageId}`);
+            }
+            imageSrc = image.image_data;
+        } else {
+            // Use current image file from server
+            if (!this.currentImage || !this.currentImage.image_file) {
+                throw new Error('No current image available');
+            }
+            imageSrc = this.currentImage.image_file;
+        }
+        
+        // Get the image element
         const imgElement = new Image();
-        imgElement.src = this.currentImage.image_file;
+        imgElement.src = imageSrc;
         
         return new Promise((resolve, reject) => {
             imgElement.onload = () => {
@@ -3726,10 +3900,24 @@ class OCRApp {
         };
     }
 
-    async performLocalImageTranscription(requestData) {
+    async performLocalImageTranscription(imageId, requestData) {
         try {
-            // Use the full image for transcription
-            const imageDataUrl = this.currentImage.image_file;
+            // Get the full image for transcription
+            let imageDataUrl;
+            if (this.isBrowserCacheMode) {
+                // Get image from IndexedDB
+                const image = await this.localStorage.get('images', imageId);
+                if (!image || !image.image_data) {
+                    throw new Error(`Image not found in cache: ${imageId}`);
+                }
+                imageDataUrl = image.image_data;
+            } else {
+                // Use current image file from server
+                if (!this.currentImage || !this.currentImage.image_file) {
+                    throw new Error('No current image available');
+                }
+                imageDataUrl = this.currentImage.image_file;
+            }
             
             if (requestData.api_endpoint === 'openai') {
                 requestData.custom_prompt = requestData.custom_prompt || 'Transcribe all the text in this image accurately, preserving formatting and structure.';
@@ -6629,10 +6817,14 @@ class OCRApp {
                     }
                     
                     // Create a clean copy without fabricObject for IndexedDB storage
+                    // Ensure image reference is always present (critical for finding annotations later)
+                    const imageId = annotation.image_id || annotation.image || this.currentImage.id;
                     const cleanAnnotation = {
                         id: annotation.id,
-                        image_id: annotation.image_id || annotation.image,
-                        annotation_type: annotation.type,
+                        image_id: imageId, // Always ensure image_id is set
+                        image: imageId, // Preserve both fields for backwards compatibility
+                        annotation_type: annotation.annotation_type || annotation.type,
+                        type: annotation.type || annotation.annotation_type, // Preserve both type fields
                         coordinates: annotation.coordinates,
                         classification: classification,
                         label: label,
@@ -6649,6 +6841,9 @@ class OCRApp {
                     annotation.label = label;
                     annotation.metadata = metadata;
                     annotation.updated_at = cleanAnnotation.updated_at;
+                    // Ensure in-memory annotation also has image references for future saves
+                    annotation.image_id = imageId;
+                    annotation.image = imageId;
                     
                     // Save transcription if it was edited
                     const transcriptionSaved = await this.saveTranscriptionEdit(annotationId);
@@ -6658,8 +6853,10 @@ class OCRApp {
                     this.hasUnsavedChanges = false;
                     this.originalFormData = null;
                     
-                    // Cancel editing mode and refresh UI
+                    // Cancel editing mode
                     this.cancelInlineEdit(annotationId);
+                    
+                    // Update UI without triggering full reload (which can lose annotations)
                     this.updateCombinedTranscription();
                     
                     if (transcriptionSaved) {
@@ -6702,8 +6899,10 @@ class OCRApp {
                     this.hasUnsavedChanges = false;
                     this.originalFormData = null;
                     
-                    // Cancel editing mode and refresh UI
+                    // Cancel editing mode
                     this.cancelInlineEdit(annotationId);
+                    
+                    // Update UI without triggering full reload (which can lose annotations)
                     this.updateCombinedTranscription();
                     
                     if (transcriptionSaved) {
@@ -7394,6 +7593,10 @@ class OCRApp {
             localStorage.removeItem('openai_model');
         }
 
+        // Save batch processing preference
+        const batchEnabled = document.getElementById('enableBatchProcessing').checked;
+        localStorage.setItem('enable_batch_processing', batchEnabled.toString());
+
         if (customEndpoint) {
             localStorage.setItem('custom_endpoint_url', customEndpoint);
         } else {
@@ -7484,6 +7687,10 @@ class OCRApp {
         document.getElementById('roboflowApiKey').value = credentials.roboflow_api_key || '';
         document.getElementById('roboflowWorkspace').value = credentials.roboflow_workspace_name || '';
         document.getElementById('roboflowWorkflowId').value = credentials.roboflow_workflow_id || '';
+        
+        // Load batch processing preference (default to enabled)
+        const batchEnabled = localStorage.getItem('enable_batch_processing');
+        document.getElementById('enableBatchProcessing').checked = batchEnabled !== 'false';
         
         // Populate model selection after credentials are loaded
         this.populateModelSelection();
@@ -8102,6 +8309,7 @@ class OCRApp {
                 const localAnnotation = {
                     id: tempId,
                     type: 'bbox',
+                    image_id: this.currentImage.id, // Add image reference for consistency
                     fabricObject: rect,
                     coordinates: coords, // Store original image coordinates
                     classification: classification,
@@ -8118,9 +8326,9 @@ class OCRApp {
                 this.annotations.push(localAnnotation);
                 rect.annotationId = tempId;
 
-                // Save to database or local storage
-                const annotationData = {
-                    image: this.currentImage.id,
+                                // Save to database or local storage
+const annotationData = {
+                    image_id: this.currentImage.id,
                     annotation_type: 'bbox',
                     coordinates: coords, // Use original image coordinates
                     classification: classification,
@@ -8138,11 +8346,15 @@ class OCRApp {
                     try {
                         const savedAnnotation = await this.localStorage.add('annotations', annotationData);
                         
-                        // Update local annotation with real ID
+                        // Update local annotation with real ID and preserve all fields
                         const annotationIndex = this.annotations.findIndex(a => a.id === tempId);
                         if (annotationIndex !== -1) {
                             this.annotations[annotationIndex].id = savedAnnotation.id;
+                            this.annotations[annotationIndex].image_id = savedAnnotation.image_id; // Preserve image reference
+                            this.annotations[annotationIndex].annotation_type = savedAnnotation.annotation_type; // Preserve type field
                             this.annotations[annotationIndex].reading_order = savedAnnotation.reading_order;
+                            this.annotations[annotationIndex].created_at = savedAnnotation.created_at;
+                            this.annotations[annotationIndex].updated_at = savedAnnotation.updated_at;
                             rect.annotationId = savedAnnotation.id;
                         }
                         
@@ -8170,11 +8382,15 @@ class OCRApp {
                     if (response.ok) {
                         const savedAnnotation = await response.json();
                         
-                        // Update local annotation with real ID
+                        // Update local annotation with real ID and preserve all fields
                         const annotationIndex = this.annotations.findIndex(a => a.id === tempId);
                         if (annotationIndex !== -1) {
                             this.annotations[annotationIndex].id = savedAnnotation.id;
+                            this.annotations[annotationIndex].image = savedAnnotation.image; // Server uses 'image' field
+                            this.annotations[annotationIndex].annotation_type = savedAnnotation.annotation_type; // Preserve type field
                             this.annotations[annotationIndex].reading_order = savedAnnotation.reading_order;
+                            this.annotations[annotationIndex].created_at = savedAnnotation.created_at;
+                            this.annotations[annotationIndex].updated_at = savedAnnotation.updated_at;
                             rect.annotationId = savedAnnotation.id;
                         }
                         
@@ -9149,8 +9365,8 @@ class OCRApp {
         try {
             if (this.isBrowserCacheMode) {
                 // Load annotations from browser cache
-                const annotations = await this.localStorage.getAll('annotations', 'image_id', this.currentImage.id);
-                console.log('Loading annotations for image:', this.currentImage.id, 'Found:', annotations.length);
+                const annotations = await this.getAnnotationsForImage(this.currentImage.id);
+                // Annotations loaded successfully
                 // Sort by reading order
                 annotations.sort((a, b) => (a.reading_order || 0) - (b.reading_order || 0));
                 this.renderAnnotationsOnCanvas(annotations);
@@ -11158,7 +11374,12 @@ class OCRApp {
 
                  try {
             this.operationCancelled = false;
-            this.showProgressModal('Transcribing Document', `Starting transcription for document (${this.getTranscriptionModeLabel(mode)})...`);
+            // Check if using batch processing for UI feedback
+            const selectedModel = this.getSelectedModel();
+            const usingBatch = selectedModel.provider === 'openai' && this.shouldUseBatchAPI(mode);
+            const batchIndicator = usingBatch ? ' (OpenAI Batch API - 50% cost savings!)' : '';
+            
+            this.showProgressModal('Transcribing Document', `Starting transcription for document (${this.getTranscriptionModeLabel(mode)})${batchIndicator}...`);
 
             const result = await this.transcribeDocumentImages(documentId, mode, credentials);
             
@@ -11182,18 +11403,78 @@ class OCRApp {
         }
      }
 
-     async transcribeDocumentImages(documentId, mode, credentials) {
-         // Get all images in the document
-         const imagesResponse = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}`, {
-             headers: { 'Authorization': `Token ${this.authToken}` }
-         });
-         
-         if (!imagesResponse.ok) throw new Error('Failed to load document images');
-         const images = await imagesResponse.json();
+         async transcribeDocumentImages(documentId, mode, credentials) {
+        // Check if using OpenAI and batch processing is enabled
+        const selectedModel = this.getSelectedModel();
+        if (selectedModel.provider === 'openai' && this.shouldUseBatchAPI(mode)) {
+            return await this.transcribeDocumentImagesBatch(documentId, mode, credentials);
+        }
+        
+        // Fall back to individual processing for non-OpenAI or single items
+        return await this.transcribeDocumentImagesIndividual(documentId, mode, credentials);
+    }
 
-         let processedCount = 0;
-         let successCount = 0;
-         const totalImages = images.results.length;
+    shouldUseBatchAPI(mode) {
+        // Check if batch processing is enabled by user (default to enabled)
+        const batchEnabled = localStorage.getItem('enable_batch_processing') !== 'false';
+        
+        if (!batchEnabled) {
+            return false;
+        }
+        
+        // Use batch API for bulk operations, but not for single image transcription
+        return mode === 'zones_only' || mode === 'untranscribed_zones' || mode === 'untranscribed_images' || mode === 'full_image';
+    }
+
+    async transcribeDocumentImagesBatch(documentId, mode, credentials) {
+        try {
+            // Step 1: Collect all items that need transcription
+            const batchItems = await this.collectBatchItems(documentId, mode);
+            
+            if (batchItems.length === 0) {
+                this.showAlert('No items found for transcription', 'info');
+                return { processed: 0, success: 0 };
+            }
+
+            // Step 2: Create batch request
+            this.updateProgress(0, 1, 'Preparing', `Preparing ${batchItems.length} items for batch processing`);
+            const batchId = await this.createOpenAIBatch(batchItems, credentials);
+            
+            if (!batchId) {
+                // Fall back to individual processing
+                return await this.transcribeDocumentImagesIndividual(documentId, mode, credentials);
+            }
+
+            // Step 3: Poll for completion and process results
+            return await this.pollAndProcessBatch(batchId, batchItems, credentials);
+
+        } catch (error) {
+            console.error('Batch processing failed:', error);
+            this.showAlert('Batch processing failed, falling back to individual processing', 'warning');
+            return await this.transcribeDocumentImagesIndividual(documentId, mode, credentials);
+        }
+    }
+
+    async transcribeDocumentImagesIndividual(documentId, mode, credentials) {
+        let images;
+        
+        if (this.isBrowserCacheMode) {
+            // Get all images for this document from IndexedDB
+            const allImages = await this.localStorage.getAll('images', 'document_id', documentId);
+            images = { results: allImages };
+        } else {
+            // Get all images in the document from server
+            const imagesResponse = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}`, {
+                headers: { 'Authorization': `Token ${this.authToken}` }
+            });
+            
+            if (!imagesResponse.ok) throw new Error('Failed to load document images');
+            images = await imagesResponse.json();
+        }
+
+        let processedCount = 0;
+        let successCount = 0;
+        const totalImages = images.results.length;
 
          // Initialize progress
          this.updateProgress(0, totalImages, 'Initializing', `Found ${totalImages} images to process`);
@@ -11205,20 +11486,31 @@ class OCRApp {
                  this.updateProgress(processedCount, totalImages, 'Processing', `Processing ${image.name}`);
 
                  if (mode === 'full_image' || mode === 'untranscribed_images') {
-                     // Check if we should skip already transcribed images
-                     if (mode === 'untranscribed_images') {
-                         const transcriptionsResponse = await fetch(`${this.apiBaseUrl}/transcriptions/?image=${image.id}&transcription_type=full_image`, {
-                             headers: { 'Authorization': `Token ${this.authToken}` }
-                         });
-                         if (transcriptionsResponse.ok) {
-                             const transcriptions = await transcriptionsResponse.json();
-                             if (transcriptions.results && transcriptions.results.length > 0) {
-                                 this.addProgressItem(image.name, 'skipped', 'Already has transcription');
-                                 processedCount++;
-                                 continue;
-                             }
-                         }
-                     }
+                                         // Check if we should skip already transcribed images
+                    if (mode === 'untranscribed_images') {
+                        let hasTranscription = false;
+                        
+                        if (this.isBrowserCacheMode) {
+                            // Check transcriptions in IndexedDB
+                            const transcriptions = await this.localStorage.getAll('transcriptions', 'image', image.id);
+                            hasTranscription = transcriptions && transcriptions.some(t => t.transcription_type === 'full_image' && t.is_current);
+                        } else {
+                            // Check transcriptions on server
+                            const transcriptionsResponse = await fetch(`${this.apiBaseUrl}/transcriptions/?image=${image.id}&transcription_type=full_image`, {
+                                headers: { 'Authorization': `Token ${this.authToken}` }
+                            });
+                            if (transcriptionsResponse.ok) {
+                                const transcriptions = await transcriptionsResponse.json();
+                                hasTranscription = transcriptions.results && transcriptions.results.length > 0;
+                            }
+                        }
+                        
+                        if (hasTranscription) {
+                            this.addProgressItem(image.name, 'skipped', 'Already has transcription');
+                            processedCount++;
+                            continue;
+                        }
+                    }
                      
                      const result = await this.transcribeImageById(image.id, credentials, 'full_image');
                      if (result.success) {
@@ -11229,49 +11521,58 @@ class OCRApp {
                      }
                      processedCount++;
                      
-                 } else if (mode === 'zones_only' || mode === 'untranscribed_zones') {
-                     // Get annotations for this image
-                     const annotationsResponse = await fetch(`${this.apiBaseUrl}/annotations/?image=${image.id}`, {
-                         headers: { 'Authorization': `Token ${this.authToken}` }
-                     });
-                     
-                     if (annotationsResponse.ok) {
-                         const annotations = await annotationsResponse.json();
-                         
-                         if (annotations.results.length === 0 && mode === 'zones_only') {
-                             this.addProgressItem(image.name, 'warning', 'No zones found - run detection first');
-                             processedCount++;
-                             continue;
-                         }
+                                 } else if (mode === 'zones_only' || mode === 'untranscribed_zones') {
+                    let annotations;
+                    
+                    // Get annotations for this image using the helper function
+                    const annotationResults = await this.getAnnotationsForImage(image.id);
+                    if (!annotationResults) {
+                        this.addProgressItem(image.name, 'error', 'Failed to load annotations');
+                        processedCount++;
+                        continue;
+                    }
+                    annotations = { results: annotationResults };
+                    
+                    if (annotations.results.length === 0 && mode === 'zones_only') {
+                        this.addProgressItem(image.name, 'warning', 'No zones found - run detection first');
+                        processedCount++;
+                        continue;
+                    }
 
-                         let imageSuccessCount = 0;
-                         let imageProcessedCount = 0;
+                    let imageSuccessCount = 0;
+                    let imageProcessedCount = 0;
 
-                         for (const annotation of annotations.results) {
-                             // Skip if only processing untranscribed and this one is already transcribed
-                             if (mode === 'untranscribed_zones') {
-                                 const hasTranscription = await this.checkAnnotationHasTranscription(annotation.id);
-                                 if (hasTranscription) continue;
-                             }
+                    for (const annotation of annotations.results) {
+                        // Skip if only processing untranscribed and this one is already transcribed
+                        if (mode === 'untranscribed_zones') {
+                            const hasTranscription = await this.checkAnnotationHasTranscription(annotation.id);
+                            if (hasTranscription) continue;
+                        }
 
-                             const result = await this.transcribeAnnotationById(annotation.id, credentials);
-                             if (result.success) {
-                                 imageSuccessCount++;
-                                 successCount++;
-                             }
-                             imageProcessedCount++;
-                             processedCount++;
-                         }
+                        try {
+                            const result = await this.transcribeAnnotationByIdWithImage(annotation.id, credentials, image);
+                            if (result.success) {
+                                imageSuccessCount++;
+                                successCount++;
+                            }
+                        } catch (error) {
+                            console.error(`Failed to transcribe annotation ${annotation.id}:`, error);
+                            // Continue with other annotations instead of failing completely
+                            if (error.message.includes('Image not found in cache')) {
+                                console.warn(`Skipping annotation ${annotation.id} - referenced image not found in cache`);
+                            }
+                        }
+                        imageProcessedCount++;
+                    }
 
-                         if (imageProcessedCount > 0) {
-                             this.addProgressItem(image.name, 'success', `Transcribed ${imageSuccessCount}/${imageProcessedCount} zones`);
-                         } else {
-                             this.addProgressItem(image.name, 'skipped', 'No zones to transcribe');
-                         }
-                     } else {
-                         this.addProgressItem(image.name, 'error', 'Failed to load annotations');
-                         processedCount++;
-                     }
+                    // Increment image processed count once per image, not per annotation
+                    processedCount++;
+
+                    if (imageProcessedCount > 0) {
+                        this.addProgressItem(image.name, 'success', `Transcribed ${imageSuccessCount}/${imageProcessedCount} zones`);
+                    } else {
+                        this.addProgressItem(image.name, 'skipped', 'No zones to transcribe');
+                    }
                  }
                  
              } catch (error) {
@@ -11280,7 +11581,7 @@ class OCRApp {
                  processedCount++;
              }
 
-             this.updateProgress(processedCount, totalImages, 'Processing', `${successCount} items transcribed so far`);
+             this.updateProgress(processedCount, totalImages, 'Processing', `Image ${processedCount}/${totalImages} - ${successCount} annotations transcribed`);
          }
 
          return { processed: processedCount, success: successCount };
@@ -11307,31 +11608,177 @@ class OCRApp {
                  requestData.custom_endpoint_auth = credentials.custom_endpoint_auth;
              }
 
-             const response = await fetch(`${this.apiBaseUrl}/images/${imageId}/transcribe/`, {
-                 method: 'POST',
-                 headers: {
-                     'Content-Type': 'application/json',
-                     'Authorization': `Token ${this.authToken}`
-                 },
-                 body: JSON.stringify(requestData)
-             });
+                         if (this.isBrowserCacheMode) {
+                // Use client-side transcription for browser cache mode
+                requestData.custom_prompt = 'Transcribe all the text in this image accurately, preserving formatting and structure.';
+                const transcription = await this.performLocalImageTranscription(imageId, requestData);
+                if (transcription) {
+                    // Store transcription in local storage
+                    const transcriptionData = {
+                        image: imageId,
+                        annotation: null,
+                        transcription_type: transcriptionType,
+                        api_endpoint: selectedModel.provider,
+                        api_model: selectedModel.model,
+                        status: 'completed',
+                        text_content: transcription.text_content,
+                        confidence_score: transcription.confidence_score || null,
+                        api_response_raw: transcription.api_response_raw || null,
+                        is_current: true,
+                        created_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString()
+                    };
+                    
+                    await this.localStorage.add('transcriptions', transcriptionData);
+                    return { success: true };
+                } else {
+                    return { success: false };
+                }
+            } else {
+                // Use server-side transcription for normal mode
+                const response = await fetch(`${this.apiBaseUrl}/images/${imageId}/transcribe/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify(requestData)
+                });
 
-             return { success: response.ok };
+                return { success: response.ok };
+            }
          } catch (error) {
              console.error(`Error transcribing image ${imageId}:`, error);
              return { success: false };
          }
      }
 
-     async transcribeAnnotationById(annotationId, credentials) {
-         try {
-             // Get annotation details to find appropriate prompt
-             const annotationResponse = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
-                 headers: { 'Authorization': `Token ${this.authToken}` }
-             });
-             
-             if (!annotationResponse.ok) return { success: false };
-             const annotation = await annotationResponse.json();
+         async transcribeAnnotationByIdWithImage(annotationId, credentials, imageData) {
+        // Version that accepts image data directly to avoid cache lookup issues
+        try {
+            let annotation;
+            
+            if (this.isBrowserCacheMode) {
+                // Get annotation details from IndexedDB
+                annotation = await this.localStorage.get('annotations', annotationId);
+                if (!annotation) return { success: false };
+            } else {
+                // Get annotation details from server
+                const annotationResponse = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
+                    headers: { 'Authorization': `Token ${this.authToken}` }
+                });
+                
+                if (!annotationResponse.ok) return { success: false };
+                annotation = await annotationResponse.json();
+            }
+            
+            // Find the appropriate prompt for this annotation's classification
+            const prompt = this.getPromptForAnnotation(annotation);
+            let finalPrompt = prompt.prompt;
+            
+            const selectedModel = this.getSelectedModel();
+            const requestData = {
+                transcription_type: 'annotation',
+                api_endpoint: selectedModel.provider,
+                api_model: selectedModel.model,
+                custom_prompt: finalPrompt,
+                expected_metadata: prompt.metadata_fields || []
+            };
+
+            if (selectedModel.provider === 'openai') {
+                requestData.openai_api_key = credentials.openai_api_key;
+                // For OpenAI, use structured output if metadata is expected
+                if (prompt.metadata_fields && prompt.metadata_fields.length > 0) {
+                    requestData.use_structured_output = true;
+                    requestData.metadata_schema = this.createMetadataSchema(prompt.metadata_fields);
+                } else {
+                    finalPrompt += '\n\nReturn the transcription as plain text. The main text should be clean and readable.';
+                    requestData.custom_prompt = finalPrompt;
+                }
+            } else if (selectedModel.provider === 'vertex') {
+                requestData.vertex_access_token = credentials.vertex_access_token;
+                requestData.vertex_project_id = credentials.vertex_project_id;
+                requestData.vertex_location = credentials.vertex_location;
+                requestData.vertex_model = selectedModel.model;
+                // For Vertex, modify prompt to request JSON output
+                if (prompt.metadata_fields && prompt.metadata_fields.length > 0) {
+                    finalPrompt += '\n\nPlease also return metadata in JSON format with the following fields: ' +
+                        prompt.metadata_fields.map(f => `${f.name} (${f.type})`).join(', ') +
+                        '. Return both the transcription and metadata in a JSON object with "text" and "metadata" keys in the following format:\n\n```json\n{"text": "your transcription here", "metadata": {"field1": value1, "field2": value2}}\n```';
+                }
+                requestData.custom_prompt = finalPrompt;
+            } else if (selectedModel.provider === 'custom') {
+                // For other models, modify prompt to request JSON output
+                if (prompt.metadata_fields && prompt.metadata_fields.length > 0) {
+                    finalPrompt += '\n\nPlease also return metadata in JSON format with the following fields: ' +
+                        prompt.metadata_fields.map(f => `${f.name} (${f.type})`).join(', ') +
+                        '. Return both the transcription and metadata in a JSON object with "text" and "metadata" keys in the following format:\n\n```json\n{"text": "your transcription here", "metadata": {"field1": value1, "field2": value2}}\n```';
+                }
+                requestData.custom_prompt = finalPrompt;
+                requestData.custom_endpoint_auth = credentials.custom_endpoint_auth;
+            }
+
+            if (this.isBrowserCacheMode) {
+                // Use client-side transcription for browser cache mode with provided image data
+                const transcription = await this.performLocalTranscriptionWithImage(annotation, requestData, imageData);
+                if (transcription) {
+                    // Store transcription in local storage
+                    const transcriptionData = {
+                        image: annotation.image_id || annotation.image,
+                        annotation: annotationId,
+                        transcription_type: 'annotation',
+                        api_endpoint: selectedModel.provider,
+                        api_model: selectedModel.model,
+                        status: 'completed',
+                        text_content: transcription.text_content,
+                        confidence_score: transcription.confidence_score || null,
+                        api_response_raw: transcription.api_response_raw || null,
+                        is_current: true,
+                        created_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString()
+                    };
+                    
+                    await this.localStorage.add('transcriptions', transcriptionData);
+                    return { success: true };
+                } else {
+                    return { success: false };
+                }
+            } else {
+                // Use server-side transcription for normal mode
+                const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/transcribe/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify(requestData)
+                });
+
+                return { success: response.ok };
+            }
+        } catch (error) {
+            console.error(`Error transcribing annotation ${annotationId}:`, error);
+            return { success: false };
+        }
+    }
+
+    async transcribeAnnotationById(annotationId, credentials) {
+        try {
+            let annotation;
+            
+            if (this.isBrowserCacheMode) {
+                // Get annotation details from IndexedDB
+                annotation = await this.localStorage.get('annotations', annotationId);
+                if (!annotation) return { success: false };
+            } else {
+                // Get annotation details from server
+                const annotationResponse = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
+                    headers: { 'Authorization': `Token ${this.authToken}` }
+                });
+                
+                if (!annotationResponse.ok) return { success: false };
+                annotation = await annotationResponse.json();
+            }
              
              // Find the appropriate prompt for this annotation's classification
              const prompt = this.getPromptForAnnotation(annotation);
@@ -11379,37 +11826,120 @@ class OCRApp {
                  requestData.custom_endpoint_auth = credentials.custom_endpoint_auth;
              }
 
-             const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/transcribe/`, {
-                 method: 'POST',
-                 headers: {
-                     'Content-Type': 'application/json',
-                     'Authorization': `Token ${this.authToken}`
-                 },
-                 body: JSON.stringify(requestData)
-             });
+                         if (this.isBrowserCacheMode) {
+                // Use client-side transcription for browser cache mode
+                const transcription = await this.performLocalTranscription(annotation, requestData);
+                if (transcription) {
+                    // Store transcription in local storage
+                    const transcriptionData = {
+                        image: annotation.image_id || annotation.image,
+                        annotation: annotationId,
+                        transcription_type: 'annotation',
+                        api_endpoint: selectedModel.provider,
+                        api_model: selectedModel.model,
+                        status: 'completed',
+                        text_content: transcription.text_content,
+                        confidence_score: transcription.confidence_score || null,
+                        api_response_raw: transcription.api_response_raw || null,
+                        is_current: true,
+                        created_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString()
+                    };
+                    
+                    await this.localStorage.add('transcriptions', transcriptionData);
+                    return { success: true };
+                } else {
+                    return { success: false };
+                }
+            } else {
+                // Use server-side transcription for normal mode
+                const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/transcribe/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify(requestData)
+                });
 
-             return { success: response.ok };
+                return { success: response.ok };
+            }
          } catch (error) {
              console.error(`Error transcribing annotation ${annotationId}:`, error);
              return { success: false };
          }
      }
 
-     async checkAnnotationHasTranscription(annotationId) {
-         try {
-             const response = await fetch(`${this.apiBaseUrl}/transcriptions/?annotation=${annotationId}`, {
-                 headers: { 'Authorization': `Token ${this.authToken}` }
-             });
-             
-             if (response.ok) {
-                 const transcriptions = await response.json();
-                 return transcriptions.results.length > 0;
-             }
-         } catch (error) {
-             console.error(`Error checking transcription for annotation ${annotationId}:`, error);
-         }
-         return false;
-     }
+         async getAnnotationsForImage(imageId) {
+        // Helper function to get annotations for an image, handling backwards compatibility
+        if (this.isBrowserCacheMode) {
+            // Try both field names for backwards compatibility
+            const annotationsByImageId = await this.localStorage.getAll('annotations', 'image_id', imageId);
+            
+            let annotationsByImage = [];
+            try {
+                // Try to get annotations by 'image' field (may not have index)
+                annotationsByImage = await this.localStorage.getAll('annotations', 'image', imageId);
+            } catch (error) {
+                // If 'image' index doesn't exist, manually filter all annotations
+                if (error.name === 'NotFoundError' || error.message.includes('index was not found')) {
+                    try {
+                        const allAnnotations = await this.localStorage.getAll('annotations');
+                        annotationsByImage = allAnnotations.filter(annotation => annotation.image === imageId);
+                    } catch (filterError) {
+                        console.warn('Could not filter annotations by image field:', filterError);
+                        annotationsByImage = [];
+                    }
+                } else {
+                    console.warn('Error querying annotations by image field:', error);
+                    annotationsByImage = [];
+                }
+            }
+            
+            // Combine and deduplicate annotations
+            const allAnnotations = [...annotationsByImageId];
+            for (const annotation of annotationsByImage) {
+                if (!allAnnotations.find(a => a.id === annotation.id)) {
+                    allAnnotations.push(annotation);
+                }
+            }
+            
+            return allAnnotations;
+        } else {
+            // In server mode, fetch from API
+            const response = await fetch(`${this.apiBaseUrl}/annotations/?image=${imageId}`, {
+                headers: { 'Authorization': `Token ${this.authToken}` }
+            });
+            if (response.ok) {
+                const data = await response.json();
+                return data.results;
+            }
+            return [];
+        }
+    }
+
+    async checkAnnotationHasTranscription(annotationId) {
+        try {
+            if (this.isBrowserCacheMode) {
+                // Check transcriptions in IndexedDB
+                const transcriptions = await this.localStorage.getAll('transcriptions', 'annotation', annotationId);
+                return transcriptions && transcriptions.some(t => t.is_current);
+            } else {
+                // Check transcriptions on server
+                const response = await fetch(`${this.apiBaseUrl}/transcriptions/?annotation=${annotationId}`, {
+                    headers: { 'Authorization': `Token ${this.authToken}` }
+                });
+                
+                if (response.ok) {
+                    const transcriptions = await response.json();
+                    return transcriptions.results.length > 0;
+                }
+            }
+        } catch (error) {
+            console.error(`Error checking transcription for annotation ${annotationId}:`, error);
+        }
+        return false;
+    }
 
      getTranscriptionModeLabel(mode) {
          const labels = {
@@ -11433,21 +11963,76 @@ class OCRApp {
 
     async executeProjectTranscription(projectId, mode, credentials, selectedTypes = []) {
         this.operationCancelled = false;
-        this.showProgressModal('Transcribing Project', 'Starting transcription for project (selected zones only)...');
+        // Check if using OpenAI and batch processing is enabled
+        const selectedModel = this.getSelectedModel();
+        const usingBatch = selectedModel.provider === 'openai' && this.shouldUseBatchAPI(mode);
+        const batchIndicator = usingBatch ? ' (OpenAI Batch API - 50% cost savings!)' : '';
+        
+        this.showProgressModal('Transcribing Project', `Starting transcription for project${batchIndicator}...`);
+        if (selectedModel.provider === 'openai' && this.shouldUseBatchAPI(mode)) {
+            return await this.executeProjectTranscriptionBatch(projectId, mode, credentials, selectedTypes);
+        }
 
+        // Fall back to individual document processing
+        return await this.executeProjectTranscriptionIndividual(projectId, mode, credentials, selectedTypes);
+    }
+
+    async executeProjectTranscriptionBatch(projectId, mode, credentials, selectedTypes = []) {
         try {
-            // Get all documents in the project
-            const docsResponse = await fetch(`${this.apiBaseUrl}/documents/?project=${projectId}`, {
-                headers: { 'Authorization': `Token ${this.authToken}` }
-            });
+            // Collect all batch items across all documents in the project
+            const batchItems = await this.collectProjectBatchItems(projectId, mode, selectedTypes);
             
-            if (!docsResponse.ok) throw new Error('Failed to load project documents');
-            const documents = await docsResponse.json();
+            if (batchItems.length === 0) {
+                this.completeProgressModal('info', 'No items found for transcription');
+                return { processed: 0, success: 0 };
+            }
+
+            // Use batch processing for the entire project
+            this.updateProgress(0, 1, 'Preparing', `Preparing ${batchItems.length} items for batch processing across project`);
+            const batchId = await this.createOpenAIBatch(batchItems, credentials);
+            
+            if (!batchId) {
+                // Fall back to individual processing
+                return await this.executeProjectTranscriptionIndividual(projectId, mode, credentials, selectedTypes);
+            }
+
+            // Poll for completion and process results
+            const result = await this.pollAndProcessBatch(batchId, batchItems, credentials);
+            
+            this.completeProgressModal('success', `Project batch transcription completed! Processed ${result.processed} items, ${result.success} successful.`);
+            await this.loadProjects();
+            
+            return result;
+
+        } catch (error) {
+            console.error('Project batch processing failed:', error);
+            this.completeProgressModal('warning', 'Batch processing failed, falling back to individual processing');
+            return await this.executeProjectTranscriptionIndividual(projectId, mode, credentials, selectedTypes);
+        }
+    }
+
+    async executeProjectTranscriptionIndividual(projectId, mode, credentials, selectedTypes = []) {
+        try {
+            let documents;
+            
+            if (this.isBrowserCacheMode) {
+                // Get all documents for this project from IndexedDB
+                const allDocs = await this.localStorage.getAll('documents', 'project_id', projectId);
+                documents = { results: allDocs };
+            } else {
+                // Get all documents in the project from server
+                const docsResponse = await fetch(`${this.apiBaseUrl}/documents/?project=${projectId}`, {
+                    headers: { 'Authorization': `Token ${this.authToken}` }
+                });
+                
+                if (!docsResponse.ok) throw new Error('Failed to load project documents');
+                documents = await docsResponse.json();
+            }
 
             let totalProcessed = 0;
             let successCount = 0;
 
-            // Process each document
+            // Process each document individually
             for (const doc of documents.results) {
                 if (this.operationCancelled) break;
                 
@@ -11463,9 +12048,182 @@ class OCRApp {
                 await this.loadProjects();
             }
 
+            return { processed: totalProcessed, success: successCount };
+
         } catch (error) {
             console.error('Project transcription error:', error);
             this.completeProgressModal('error', `Project transcription failed: ${error.message}`);
+            return { processed: 0, success: 0 };
+        }
+    }
+
+    async collectProjectBatchItems(projectId, mode, selectedTypes = []) {
+        const batchItems = [];
+        let documents;
+        
+        if (this.isBrowserCacheMode) {
+            const allDocs = await this.localStorage.getAll('documents', 'project_id', projectId);
+            documents = { results: allDocs };
+        } else {
+            const docsResponse = await fetch(`${this.apiBaseUrl}/documents/?project=${projectId}`, {
+                headers: { 'Authorization': `Token ${this.authToken}` }
+            });
+            if (!docsResponse.ok) throw new Error('Failed to load project documents');
+            documents = await docsResponse.json();
+        }
+
+        // Collect items from all documents
+        for (const doc of documents.results) {
+            const docBatchItems = await this.collectBatchItems(doc.id, mode);
+            
+            // Filter by selected types if specified
+            const filteredItems = selectedTypes.length > 0 
+                ? docBatchItems.filter(item => {
+                    if (item.type === 'annotation') {
+                        const annotationType = item.annotation.annotation_type || item.annotation.type;
+                        return selectedTypes.includes(annotationType);
+                    }
+                    return true;
+                })
+                : docBatchItems;
+            
+            batchItems.push(...filteredItems);
+        }
+
+        return batchItems;
+    }
+
+    async showBatchStatus() {
+        if (!this.isBrowserCacheMode) {
+            this.showAlert('Batch status is only available in browser cache mode', 'info');
+            return;
+        }
+
+        try {
+            const credentials = this.getStoredCredentials();
+            if (!credentials.openai_api_key) {
+                this.showAlert('OpenAI API key required to check batch status', 'warning');
+                return;
+            }
+
+            // Get all batch settings
+            const allSettings = await this.localStorage.getAllSettings();
+            const batchSettings = Object.entries(allSettings).filter(([key, value]) => 
+                key.startsWith('batch_') && value && value.batchId
+            );
+
+            if (batchSettings.length === 0) {
+                this.showAlert('No active batches found', 'info');
+                return;
+            }
+
+            let statusHtml = '<div class="batch-status-list">';
+            statusHtml += '<h5>Active OpenAI Batches:</h5>';
+
+            for (const [settingKey, batchInfo] of batchSettings) {
+                try {
+                    // Check current status
+                    const statusResponse = await fetch(`https://api.openai.com/v1/batches/${batchInfo.batchId}`, {
+                        headers: { 'Authorization': `Bearer ${credentials.openai_api_key}` }
+                    });
+
+                    if (statusResponse.ok) {
+                        const batchStatus = await statusResponse.json();
+                        const createdDate = new Date(batchInfo.created_at).toLocaleString();
+                        const itemCount = batchInfo.items ? batchInfo.items.length : 'Unknown';
+                        
+                        statusHtml += `
+                            <div class="batch-item mb-3 p-3 border rounded">
+                                <div class="d-flex justify-content-between align-items-start">
+                                    <div>
+                                        <strong>Batch ID:</strong> ${batchStatus.id}<br>
+                                        <strong>Status:</strong> <span class="badge badge-${this.getBatchStatusColor(batchStatus.status)}">${batchStatus.status}</span><br>
+                                        <strong>Items:</strong> ${itemCount}<br>
+                                        <strong>Created:</strong> ${createdDate}<br>
+                                        ${batchStatus.completed_at ? `<strong>Completed:</strong> ${new Date(batchStatus.completed_at * 1000).toLocaleString()}<br>` : ''}
+                                        ${batchStatus.request_counts ? `<strong>Progress:</strong> ${batchStatus.request_counts.completed || 0}/${batchStatus.request_counts.total || 0}` : ''}
+                                    </div>
+                                    <div>
+                                        ${batchStatus.status === 'completed' ? 
+                                            `<button class="btn btn-sm btn-outline-danger" onclick="app.cleanupBatch('${settingKey}')">Remove</button>` :
+                                            `<button class="btn btn-sm btn-outline-warning" onclick="app.cancelBatch('${batchInfo.batchId}', '${settingKey}')">Cancel</button>`
+                                        }
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        statusHtml += `
+                            <div class="batch-item mb-3 p-3 border rounded">
+                                <div class="text-warning">
+                                    <strong>Batch ID:</strong> ${batchInfo.batchId}<br>
+                                    <strong>Status:</strong> Error checking status<br>
+                                    <button class="btn btn-sm btn-outline-danger" onclick="app.cleanupBatch('${settingKey}')">Remove</button>
+                                </div>
+                            </div>
+                        `;
+                    }
+                } catch (error) {
+                    console.error('Error checking batch status:', error);
+                }
+            }
+
+            statusHtml += '</div>';
+
+            // Show in a modal
+            this.showAlert(statusHtml, 'info', 'OpenAI Batch Status', true);
+
+        } catch (error) {
+            console.error('Error showing batch status:', error);
+            this.showAlert('Error loading batch status', 'danger');
+        }
+    }
+
+    getBatchStatusColor(status) {
+        switch (status) {
+            case 'validating': return 'warning';
+            case 'in_progress': return 'primary';
+            case 'finalizing': return 'info';
+            case 'completed': return 'success';
+            case 'failed': return 'danger';
+            case 'expired': return 'secondary';
+            case 'cancelled': return 'secondary';
+            default: return 'light';
+        }
+    }
+
+    async cleanupBatch(settingKey) {
+        try {
+            await this.localStorage.setSetting(settingKey, null);
+            this.showAlert('Batch removed from local storage', 'success');
+            // Refresh the batch status display
+            setTimeout(() => this.showBatchStatus(), 1000);
+        } catch (error) {
+            console.error('Error cleaning up batch:', error);
+            this.showAlert('Error removing batch', 'danger');
+        }
+    }
+
+    async cancelBatch(batchId, settingKey) {
+        try {
+            const credentials = this.getStoredCredentials();
+            const response = await fetch(`https://api.openai.com/v1/batches/${batchId}/cancel`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${credentials.openai_api_key}` }
+            });
+
+            if (response.ok) {
+                this.showAlert('Batch cancellation requested', 'success');
+                // Clean up local reference
+                await this.localStorage.setSetting(settingKey, null);
+                // Refresh the batch status display
+                setTimeout(() => this.showBatchStatus(), 1000);
+            } else {
+                this.showAlert('Failed to cancel batch', 'danger');
+            }
+        } catch (error) {
+            console.error('Error cancelling batch:', error);
+            this.showAlert('Error cancelling batch', 'danger');
         }
     }
 
@@ -11496,13 +12254,21 @@ class OCRApp {
     }
 
     async transcribeDocumentImagesWithFilter(documentId, credentials, selectedTypes) {
-        // Get all images in the document
-        const imagesResponse = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}`, {
-            headers: { 'Authorization': `Token ${this.authToken}` }
-        });
+        let images;
         
-        if (!imagesResponse.ok) throw new Error('Failed to load document images');
-        const images = await imagesResponse.json();
+        if (this.isBrowserCacheMode) {
+            // Get all images for this document from IndexedDB
+            const allImages = await this.localStorage.getAll('images', 'document_id', documentId);
+            images = { results: allImages };
+        } else {
+            // Get all images in the document from server
+            const imagesResponse = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}`, {
+                headers: { 'Authorization': `Token ${this.authToken}` }
+            });
+            
+            if (!imagesResponse.ok) throw new Error('Failed to load document images');
+            images = await imagesResponse.json();
+        }
 
         let processedCount = 0;
         let successCount = 0;
@@ -11517,43 +12283,52 @@ class OCRApp {
             try {
                 this.updateProgress(processedCount, totalImages, 'Processing', `Processing ${image.name}`);
 
-                // Get annotations for this image
-                const annotationsResponse = await fetch(`${this.apiBaseUrl}/annotations/?image=${image.id}`, {
-                    headers: { 'Authorization': `Token ${this.authToken}` }
-                });
+                let annotations;
                 
-                if (annotationsResponse.ok) {
-                    const annotations = await annotationsResponse.json();
-                    
-                    // Filter annotations to only include selected types
-                    const filteredAnnotations = annotations.results.filter(annotation => 
-                        selectedTypes.includes(annotation.classification)
-                    );
+                // Get annotations for this image using the helper function
+                const annotationResults = await this.getAnnotationsForImage(image.id);
+                if (!annotationResults) {
+                    this.addProgressItem(image.name, 'error', 'Failed to load annotations');
+                    processedCount++;
+                    continue;
+                }
+                annotations = { results: annotationResults };
+                
+                // Filter annotations to only include selected types
+                const filteredAnnotations = annotations.results.filter(annotation => 
+                    selectedTypes.includes(annotation.classification)
+                );
 
-                    if (filteredAnnotations.length === 0) {
-                        this.addProgressItem(image.name, 'skipped', 'No matching zones found');
-                        processedCount++;
-                        continue;
-                    }
+                if (filteredAnnotations.length === 0) {
+                    this.addProgressItem(image.name, 'skipped', 'No matching zones found');
+                    processedCount++;
+                    continue;
+                }
 
-                    let imageSuccessCount = 0;
-                    let imageProcessedCount = 0;
+                let imageSuccessCount = 0;
+                let imageProcessedCount = 0;
 
-                    for (const annotation of filteredAnnotations) {
-                        const result = await this.transcribeAnnotationById(annotation.id, credentials);
+                for (const annotation of filteredAnnotations) {
+                    try {
+                        const result = await this.transcribeAnnotationByIdWithImage(annotation.id, credentials, image);
                         if (result.success) {
                             imageSuccessCount++;
                             successCount++;
                         }
-                        imageProcessedCount++;
-                        processedCount++;
+                    } catch (error) {
+                        console.error(`Failed to transcribe annotation ${annotation.id}:`, error);
+                        // Continue with other annotations instead of failing completely
+                        if (error.message.includes('Image not found in cache')) {
+                            console.warn(`Skipping annotation ${annotation.id} - referenced image not found in cache`);
+                        }
                     }
-
-                    this.addProgressItem(image.name, 'success', `Transcribed ${imageSuccessCount}/${imageProcessedCount} selected zones`);
-                } else {
-                    this.addProgressItem(image.name, 'error', 'Failed to load annotations');
-                    processedCount++;
+                    imageProcessedCount++;
                 }
+
+                // Increment image processed count once per image, not per annotation
+                processedCount++;
+
+                this.addProgressItem(image.name, 'success', `Transcribed ${imageSuccessCount}/${imageProcessedCount} selected zones`);
                 
             } catch (error) {
                 console.error(`Failed to process image ${image.id}:`, error);
@@ -11561,10 +12336,473 @@ class OCRApp {
                 processedCount++;
             }
 
-            this.updateProgress(processedCount, totalImages, 'Processing', `${successCount} items transcribed so far`);
+            this.updateProgress(processedCount, totalImages, 'Processing', `Image ${processedCount}/${totalImages} - ${successCount} annotations transcribed`);
         }
 
         return { processed: processedCount, success: successCount };
+    }
+
+    async checkAnnotationHasTranscription(annotationId) {
+        if (this.isBrowserCacheMode) {
+            const transcriptions = await this.localStorage.getAll('transcriptions', 'annotation', annotationId);
+            return transcriptions && transcriptions.some(t => t.is_current);
+        } else {
+            try {
+                const response = await fetch(`${this.apiBaseUrl}/transcriptions/?annotation=${annotationId}`, {
+                    headers: { 'Authorization': `Token ${this.authToken}` }
+                });
+                if (response.ok) {
+                    const transcriptions = await response.json();
+                    return transcriptions.results && transcriptions.results.length > 0;
+                }
+            } catch (error) {
+                console.warn('Error checking transcription:', error);
+            }
+        }
+        return false;
+    }
+
+    getPromptForAnnotation(annotation) {
+        const annotationType = annotation.annotation_type || annotation.type;
+        const customPrompts = this.userProfile?.custom_prompts || [];
+        
+        // Find matching prompt for this annotation type
+        for (const promptObj of customPrompts) {
+            if (promptObj.zones && promptObj.zones.includes(annotationType)) {
+                return {
+                    prompt: promptObj.prompt,
+                    metadata_fields: promptObj.metadata_fields || []
+                };
+            }
+        }
+        
+        // Default prompt if no custom prompt found
+        return {
+            prompt: 'Transcribe the text in this image region accurately.',
+            metadata_fields: []
+        };
+    }
+
+    createMetadataSchema(metadataFields) {
+        const properties = {
+            text: {
+                type: "string",
+                description: "The transcribed text content"
+            }
+        };
+
+        const metadataProps = {};
+        for (const field of metadataFields) {
+            metadataProps[field] = {
+                type: "string",
+                description: `Extract ${field} information from the text`
+            };
+        }
+
+        if (Object.keys(metadataProps).length > 0) {
+            properties.metadata = {
+                type: "object",
+                properties: metadataProps
+            };
+        }
+
+        return {
+            type: "object",
+            properties: properties,
+            required: ["text"],
+            additionalProperties: false
+        };
+    }
+
+    async collectBatchItems(documentId, mode) {
+        const batchItems = [];
+        let images;
+        
+        if (this.isBrowserCacheMode) {
+            const allImages = await this.localStorage.getAll('images', 'document_id', documentId);
+            images = { results: allImages };
+        } else {
+            const imagesResponse = await fetch(`${this.apiBaseUrl}/images/?document=${documentId}`, {
+                headers: { 'Authorization': `Token ${this.authToken}` }
+            });
+            if (!imagesResponse.ok) throw new Error('Failed to load document images');
+            images = await imagesResponse.json();
+        }
+
+        for (const image of images.results) {
+            if (mode === 'full_image' || mode === 'untranscribed_images') {
+                // Check if already transcribed for untranscribed_images mode
+                if (mode === 'untranscribed_images') {
+                    let hasTranscription = false;
+                    if (this.isBrowserCacheMode) {
+                        const transcriptions = await this.localStorage.getAll('transcriptions', 'image', image.id);
+                        hasTranscription = transcriptions && transcriptions.some(t => t.transcription_type === 'full_image' && t.is_current);
+                    } else {
+                        const transcriptionsResponse = await fetch(`${this.apiBaseUrl}/transcriptions/?image=${image.id}&transcription_type=full_image`, {
+                            headers: { 'Authorization': `Token ${this.authToken}` }
+                        });
+                        if (transcriptionsResponse.ok) {
+                            const transcriptions = await transcriptionsResponse.json();
+                            hasTranscription = transcriptions.results && transcriptions.results.length > 0;
+                        }
+                    }
+                    if (hasTranscription) continue;
+                }
+
+                // Add full image transcription item
+                batchItems.push({
+                    type: 'full_image',
+                    imageId: image.id,
+                    imageName: image.name,
+                    imageData: image,
+                    prompt: 'Transcribe all the text in this image accurately, preserving formatting and structure.'
+                });
+            } else if (mode === 'zones_only' || mode === 'untranscribed_zones') {
+                // Get annotations for this image
+                const annotationResults = await this.getAnnotationsForImage(image.id);
+                if (!annotationResults || annotationResults.length === 0) continue;
+
+                for (const annotation of annotationResults) {
+                    // Check if already transcribed for untranscribed_zones mode
+                    if (mode === 'untranscribed_zones') {
+                        const hasTranscription = await this.checkAnnotationHasTranscription(annotation.id);
+                        if (hasTranscription) continue;
+                    }
+
+                    // Get appropriate prompt for this annotation
+                    const prompt = this.getPromptForAnnotation(annotation);
+
+                    batchItems.push({
+                        type: 'annotation',
+                        annotationId: annotation.id,
+                        annotation: annotation,
+                        imageId: image.id,
+                        imageName: image.name,
+                        imageData: image,
+                        prompt: prompt.prompt,
+                        metadata_fields: prompt.metadata_fields || []
+                    });
+                }
+            }
+        }
+
+        return batchItems;
+    }
+
+    async createOpenAIBatch(batchItems, credentials) {
+        try {
+            // Prepare batch requests
+            const requests = [];
+            
+            for (let i = 0; i < batchItems.length; i++) {
+                const item = batchItems[i];
+                
+                // Get image data for the request
+                let imageDataUrl;
+                if (item.type === 'full_image') {
+                    imageDataUrl = item.imageData.image_data || item.imageData.image_file;
+                } else {
+                    // Extract annotation region
+                    imageDataUrl = await this.getAnnotationImageDataFromImage(item.annotation, item.imageData);
+                }
+
+                // Optimize image for API
+                const optimizedImageUrl = await this.optimizeImageForAPI(imageDataUrl, 2048);
+
+                // Create OpenAI request
+                let messages = [{
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'text',
+                            text: item.prompt
+                        },
+                        {
+                            type: 'image_url',
+                            image_url: { url: optimizedImageUrl }
+                        }
+                    ]
+                }];
+
+                let requestBody = {
+                    model: this.getSelectedModel().model,
+                    messages: messages,
+                    max_tokens: 4000
+                };
+
+                // Add structured output for metadata extraction
+                if (item.metadata_fields && item.metadata_fields.length > 0) {
+                    requestBody.response_format = {
+                        type: "json_schema",
+                        json_schema: {
+                            name: "transcription_with_metadata",
+                            schema: this.createMetadataSchema(item.metadata_fields)
+                        }
+                    };
+                }
+
+                requests.push({
+                    custom_id: `request_${i}`,
+                    method: 'POST',
+                    url: '/v1/chat/completions',
+                    body: requestBody
+                });
+            }
+
+            // Create batch file
+            const batchRequestData = requests.map(req => JSON.stringify(req)).join('\n');
+            
+            // Upload batch file
+            const fileFormData = new FormData();
+            const blob = new Blob([batchRequestData], { type: 'application/jsonl' });
+            fileFormData.append('file', blob, 'batch_requests.jsonl');
+            fileFormData.append('purpose', 'batch');
+
+            const fileResponse = await fetch('https://api.openai.com/v1/files', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${credentials.openai_api_key}`
+                },
+                body: fileFormData
+            });
+
+            if (!fileResponse.ok) {
+                throw new Error('Failed to upload batch file');
+            }
+
+            const fileData = await fileResponse.json();
+
+            // Create batch
+            const batchResponse = await fetch('https://api.openai.com/v1/batches', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${credentials.openai_api_key}`
+                },
+                body: JSON.stringify({
+                    input_file_id: fileData.id,
+                    endpoint: '/v1/chat/completions',
+                    completion_window: '24h',
+                    metadata: {
+                        purpose: 'vlamy_transcription',
+                        document_id: batchItems.length > 0 ? (batchItems[0].imageData.document_id || batchItems[0].imageData.document || 'unknown') : 'unknown'
+                    }
+                })
+            });
+
+            if (!batchResponse.ok) {
+                throw new Error('Failed to create batch');
+            }
+
+            const batchCreateData = await batchResponse.json();
+            
+            // Store batch info for later retrieval
+            if (this.isBrowserCacheMode) {
+                await this.localStorage.setSetting(`batch_${batchCreateData.id}`, {
+                    batchId: batchCreateData.id,
+                    items: batchItems,
+                    created_at: new Date().toISOString(),
+                    status: 'validating'
+                });
+            }
+
+            return batchCreateData.id;
+
+        } catch (error) {
+            console.error('Failed to create OpenAI batch:', error);
+            return null;
+        }
+    }
+
+    async pollAndProcessBatch(batchId, batchItems, credentials) {
+        const maxPollingTime = 30 * 60 * 1000; // 30 minutes
+        const pollingInterval = 10000; // 10 seconds
+        const startTime = Date.now();
+
+        this.updateProgress(0, 1, 'Processing', `Batch submitted. Waiting for OpenAI to process ${batchItems.length} items...`);
+
+        while (Date.now() - startTime < maxPollingTime) {
+            if (this.operationCancelled) {
+                this.showAlert('Batch processing cancelled', 'info');
+                return { processed: 0, success: 0 };
+            }
+
+            try {
+                // Check batch status
+                const statusResponse = await fetch(`https://api.openai.com/v1/batches/${batchId}`, {
+                    headers: {
+                        'Authorization': `Bearer ${credentials.openai_api_key}`
+                    }
+                });
+
+                if (!statusResponse.ok) {
+                    throw new Error('Failed to check batch status');
+                }
+
+                const batchStatus = await statusResponse.json();
+                
+                // Update progress based on status
+                const elapsed = Math.round((Date.now() - startTime) / 1000);
+                this.updateProgress(0, 1, 'Processing', `Batch ${batchStatus.status}... (${elapsed}s elapsed)`);
+
+                if (batchStatus.status === 'completed') {
+                    // Process results
+                    return await this.processBatchResults(batchId, batchItems, credentials);
+                } else if (batchStatus.status === 'failed' || batchStatus.status === 'expired' || batchStatus.status === 'cancelled') {
+                    throw new Error(`Batch processing ${batchStatus.status}`);
+                }
+
+                // Wait before next poll
+                await new Promise(resolve => setTimeout(resolve, pollingInterval));
+
+            } catch (error) {
+                console.error('Error polling batch status:', error);
+                this.showAlert('Batch processing error, falling back to individual processing', 'warning');
+                // Extract documentId from batch items if available
+                const documentId = batchItems.length > 0 ? batchItems[0].imageData.document_id : null;
+                return await this.transcribeDocumentImagesIndividual(documentId, mode, credentials);
+            }
+        }
+
+        // Timeout reached
+        this.showAlert('Batch processing timeout, falling back to individual processing', 'warning');
+        // Extract documentId from batch items if available
+        const documentId = batchItems.length > 0 ? batchItems[0].imageData.document_id : null;
+        return await this.transcribeDocumentImagesIndividual(documentId, mode, credentials);
+    }
+
+    async processBatchResults(batchId, batchItems, credentials) {
+        try {
+            // Get batch details
+            const batchResponse = await fetch(`https://api.openai.com/v1/batches/${batchId}`, {
+                headers: {
+                    'Authorization': `Bearer ${credentials.openai_api_key}`
+                }
+            });
+
+            const batchResultData = await batchResponse.json();
+
+            // Download results file
+            const resultsResponse = await fetch(`https://api.openai.com/v1/files/${batchResultData.output_file_id}/content`, {
+                headers: {
+                    'Authorization': `Bearer ${credentials.openai_api_key}`
+                }
+            });
+
+            const resultsText = await resultsResponse.text();
+            const results = resultsText.trim().split('\n').map(line => JSON.parse(line));
+
+            // Process each result
+            let successCount = 0;
+            const selectedModel = this.getSelectedModel();
+
+            this.updateProgress(0, results.length, 'Saving', 'Processing batch results...');
+
+            for (let i = 0; i < results.length; i++) {
+                const result = results[i];
+                const item = batchItems[parseInt(result.custom_id.replace('request_', ''))];
+
+                if (result.response && result.response.body && result.response.body.choices) {
+                    try {
+                        const messageContent = result.response.body.choices[0].message.content;
+                        let transcriptionText = messageContent;
+                        let metadata = {};
+
+                        // Parse structured output if applicable
+                        if (item.metadata_fields && item.metadata_fields.length > 0) {
+                            try {
+                                const parsed = JSON.parse(messageContent);
+                                transcriptionText = parsed.text || messageContent;
+                                metadata = parsed.metadata || {};
+                            } catch (parseError) {
+                                console.warn('Failed to parse structured output:', parseError);
+                            }
+                        }
+
+                        // Save transcription
+                        const transcriptionData = {
+                            image: item.imageId,
+                            annotation: item.type === 'annotation' ? item.annotationId : null,
+                            transcription_type: item.type === 'full_image' ? 'full_image' : 'annotation',
+                            api_endpoint: 'openai',
+                            api_model: selectedModel.model,
+                            status: 'completed',
+                            text_content: transcriptionText,
+                            confidence_score: null,
+                            api_response_raw: JSON.stringify(result.response.body),
+                            is_current: true,
+                            created_at: new Date().toISOString(),
+                            updated_at: new Date().toISOString()
+                        };
+
+
+
+                        let savedTranscription;
+                        if (this.isBrowserCacheMode) {
+                            savedTranscription = await this.localStorage.add('transcriptions', transcriptionData);
+                        } else {
+                            // Save to server
+                            const response = await fetch(`${this.apiBaseUrl}/transcriptions/`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Authorization': `Token ${this.authToken}`
+                                },
+                                body: JSON.stringify(transcriptionData)
+                            });
+                            if (response.ok) {
+                                savedTranscription = await response.json();
+                            }
+                        }
+
+                        // Update in-memory annotation object with transcription (only if it's on current image)
+                        if (savedTranscription && item.type === 'annotation') {
+                            // For batch transcriptions, also include metadata if available
+                            if (Object.keys(metadata).length > 0) {
+                                savedTranscription.parsed_metadata = metadata;
+                            }
+                            
+                            // Only update if this annotation is currently loaded (on current image)
+                            if (this.currentImage && this.currentImage.id === item.imageId) {
+                                this.updateAnnotationTranscription(item.annotationId, savedTranscription);
+                            }
+                        }
+
+                        successCount++;
+                        this.addProgressItem(item.imageName, 'success', `Transcribed ${item.type === 'full_image' ? 'full image' : 'annotation'}`);
+
+                    } catch (saveError) {
+                        console.error('Failed to save transcription:', saveError);
+                        this.addProgressItem(item.imageName, 'error', 'Failed to save transcription');
+                    }
+                } else {
+                    console.error('Invalid result for item:', item);
+                    this.addProgressItem(item.imageName, 'error', 'Invalid API response');
+                }
+
+                this.updateProgress(i + 1, results.length, 'Saving', `Saved ${successCount}/${i + 1} transcriptions`);
+            }
+
+            // Clean up batch info
+            if (this.isBrowserCacheMode) {
+                try {
+                    await this.localStorage.setSetting(`batch_${batchId}`, null);
+                } catch (cleanupError) {
+                    console.warn('Failed to cleanup batch info:', cleanupError);
+                }
+            }
+
+            // Refresh UI to show updated transcriptions without triggering reloads
+            this.updateCombinedTranscription();
+            
+            this.showAlert(`Batch processing completed! ${successCount}/${results.length} transcriptions saved`, 'success');
+            return { processed: results.length, success: successCount };
+
+        } catch (error) {
+            console.error('Failed to process batch results:', error);
+            this.showAlert('Failed to process batch results', 'danger');
+            return { processed: 0, success: 0 };
+        }
     }
 
     // Zone Selection Modal Functions
@@ -12239,6 +13477,11 @@ class OCRApp {
                     }
                 }
 
+                // If we're processing the currently displayed image, reload annotations to sync in-memory state
+                if (this.currentImage && this.currentImage.id === imageId) {
+                    await this.loadImageAnnotations();
+                }
+                
                 return { success: true, count: savedCount };
             } else {
                 // Use server-side detection for normal mode
