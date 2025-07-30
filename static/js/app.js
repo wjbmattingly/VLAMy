@@ -1273,6 +1273,16 @@ class OCRApp {
             });
         }
         
+        // Confidence threshold slider
+        const confidenceThreshold = document.getElementById('confidenceThreshold');
+        if (confidenceThreshold) {
+            confidenceThreshold.addEventListener('input', (e) => {
+                const value = parseFloat(e.target.value);
+                const percentage = Math.round(value * 100);
+                document.getElementById('confidenceValue').textContent = `${percentage}%`;
+            });
+        }
+        
         // Navigation
         document.addEventListener('keydown', (e) => this.handleKeyboard(e));
         
@@ -7561,8 +7571,14 @@ class OCRApp {
             return;
         }
 
+        // Check if in browser cache mode - use client-side detection
+        if (this.isBrowserCacheMode) {
+            return await this.startZoneLineDetectionBrowserCache();
+        }
+
         const credentials = this.getStoredCredentials();
         const filterSelected = document.getElementById('filterSelectedTypes').checked;
+        const confidenceThreshold = parseFloat(document.getElementById('confidenceThreshold').value);
         
         // Collect selected types if filtering is enabled
         let selectedZoneTypes = [];
@@ -7581,9 +7597,8 @@ class OCRApp {
             }
         }
 
-        // Show progress
-        document.getElementById('detectionProgress').style.display = 'block';
-        document.getElementById('detectionResults').style.display = 'none';
+        // Close modal immediately and show progress
+        bootstrap.Modal.getInstance(document.getElementById('detectZonesLinesModal')).hide();
         document.getElementById('startDetectionBtn').disabled = true;
 
         try {
@@ -7597,28 +7612,21 @@ class OCRApp {
                     roboflow_api_key: credentials.roboflow_api_key,
                     filter_selected_types: filterSelected,
                     selected_zone_types: selectedZoneTypes,
-                    selected_line_types: selectedLineTypes
+                    selected_line_types: selectedLineTypes,
+                    confidence_threshold: confidenceThreshold
                 })
             });
 
             const result = await response.json();
 
             if (response.ok) {
-                // Hide progress and show results
-                document.getElementById('detectionProgress').style.display = 'none';
-                document.getElementById('detectionResults').style.display = 'block';
-                
                 const detections = result.detections.detections;
-                document.getElementById('detectionResultsText').textContent = 
-                    `Detection completed! Found ${detections.length} zones/lines.`;
 
                 // Add detected annotations to the canvas
                 await this.addDetectedAnnotations(detections);
-
-                // Close modal after a short delay
-                setTimeout(() => {
-                    bootstrap.Modal.getInstance(document.getElementById('detectZonesLinesModal')).hide();
-                }, 2000);
+                
+                // Show success message
+                this.showAlert(`Detection completed! Found ${detections.length} zones/lines.`, 'success');
 
             } else {
                 throw new Error(result.error || 'Detection failed');
@@ -7626,7 +7634,140 @@ class OCRApp {
 
         } catch (error) {
             console.error('Zone/line detection error:', error);
-            document.getElementById('detectionProgress').style.display = 'none';
+            this.showAlert(`Detection failed: ${error.message}`, 'danger');
+        } finally {
+            document.getElementById('startDetectionBtn').disabled = false;
+        }
+    }
+
+    async startZoneLineDetectionBrowserCache() {
+        const filterSelected = document.getElementById('filterSelectedTypes').checked;
+        const confidenceThreshold = parseFloat(document.getElementById('confidenceThreshold').value);
+        
+        // Collect selected types if filtering is enabled
+        let selectedZoneTypes = [];
+        let selectedLineTypes = [];
+        
+        if (filterSelected) {
+            const zoneCheckboxes = document.querySelectorAll('#detectionZoneTypes input[type="checkbox"]:checked');
+            const lineCheckboxes = document.querySelectorAll('#detectionLineTypes input[type="checkbox"]:checked');
+            
+            selectedZoneTypes = Array.from(zoneCheckboxes).map(cb => cb.value);
+            selectedLineTypes = Array.from(lineCheckboxes).map(cb => cb.value);
+            
+            if (selectedZoneTypes.length === 0 && selectedLineTypes.length === 0) {
+                this.showAlert('Please select at least one zone or line type to detect', 'warning');
+                return;
+            }
+        }
+
+        // Close modal immediately and show progress
+        bootstrap.Modal.getInstance(document.getElementById('detectZonesLinesModal')).hide();
+        document.getElementById('startDetectionBtn').disabled = true;
+
+        try {
+            // Get current image data as base64
+            let imageData = this.currentImage.image_file;
+            
+            // If image_file is not base64, we need to convert it
+            if (!imageData || !imageData.startsWith('data:')) {
+                throw new Error('Image data not available for detection');
+            }
+
+            // Call Roboflow serverless API
+            const response = await fetch('https://serverless.roboflow.com/infer/workflows/yale-ai/page-xml', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    api_key: 'gcV24jJosN6XtPnBp7x1',
+                    inputs: {
+                        "image": {"type": "base64", "value": imageData}
+                    }
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Detection API error: ${response.status} ${response.statusText}`);
+            }
+
+            const result = await response.json();
+            console.log('Roboflow detection result:', result);
+
+            // Process the results - Handle the nested Roboflow workflow structure
+            let detections = [];
+            
+            if (result && result.outputs && result.outputs.length > 0) {
+                // Roboflow workflow format: outputs[0].predictions.predictions
+                const output = result.outputs[0];
+                if (output.predictions && output.predictions.predictions) {
+                    detections = output.predictions.predictions
+                        .filter(pred => pred.confidence >= confidenceThreshold)
+                        .map(pred => ({
+                            coordinates: {
+                                x: pred.x - pred.width / 2,  // Convert center to top-left
+                                y: pred.y - pred.height / 2,
+                                width: pred.width,
+                                height: pred.height
+                            },
+                            classification: pred.class || pred.class_name || 'detected_region',
+                            confidence: pred.confidence,
+                            original_class: pred.class || pred.class_name || 'detected_region'
+                        }));
+                }
+            } else if (result && result.predictions) {
+                // Simple predictions format
+                detections = result.predictions
+                    .filter(pred => pred.confidence >= confidenceThreshold)
+                    .map(pred => ({
+                        coordinates: {
+                            x: pred.x - pred.width / 2,  // Convert center to top-left
+                            y: pred.y - pred.height / 2,
+                            width: pred.width,
+                            height: pred.height
+                        },
+                        classification: pred.class || pred.class_name || 'detected_region',
+                        confidence: pred.confidence || 0.8,
+                        original_class: pred.class || pred.class_name || 'detected_region'
+                    }));
+            } else if (result && result.detections && result.detections.detections) {
+                // Already in our expected format
+                detections = result.detections.detections.filter(det => det.confidence >= confidenceThreshold);
+            } else if (result && Array.isArray(result)) {
+                // Array of detections
+                detections = result
+                    .filter(det => (det.confidence || 0.8) >= confidenceThreshold)
+                    .map(det => ({
+                        coordinates: det.coordinates || {
+                            x: det.x - (det.width || 0) / 2,
+                            y: det.y - (det.height || 0) / 2,
+                            width: det.width || 0,
+                            height: det.height || 0
+                        },
+                        classification: det.class || det.classification || 'detected_region',
+                        confidence: det.confidence || 0.8,
+                        original_class: det.class || det.classification || 'detected_region'
+                    }));
+            }
+
+            // Filter by selected types if filtering is enabled
+            if (filterSelected && (selectedZoneTypes.length > 0 || selectedLineTypes.length > 0)) {
+                const allowedTypes = [...selectedZoneTypes, ...selectedLineTypes];
+                detections = detections.filter(det => 
+                    allowedTypes.includes(det.classification) || 
+                    allowedTypes.includes(det.original_class)
+                );
+            }
+
+            // Add detected annotations to the canvas
+            await this.addDetectedAnnotations(detections);
+            
+            // Show success message
+            this.showAlert(`Detection completed! Found ${detections.length} zones/lines.`, 'success');
+
+        } catch (error) {
+            console.error('Zone/line detection error:', error);
             this.showAlert(`Detection failed: ${error.message}`, 'danger');
         } finally {
             document.getElementById('startDetectionBtn').disabled = false;
@@ -7709,7 +7850,7 @@ class OCRApp {
                 this.annotations.push(localAnnotation);
                 rect.annotationId = tempId;
 
-                // Save to database
+                // Save to database or local storage
                 const annotationData = {
                     image: this.currentImage.id,
                     annotation_type: 'bbox',
@@ -7724,35 +7865,61 @@ class OCRApp {
                     }
                 };
 
-                const response = await fetch(`${this.apiBaseUrl}/annotations/`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Token ${this.authToken}`
-                    },
-                    body: JSON.stringify(annotationData)
-                });
-
-                if (response.ok) {
-                    const savedAnnotation = await response.json();
-                    
-                    // Update local annotation with real ID
-                    const annotationIndex = this.annotations.findIndex(a => a.id === tempId);
-                    if (annotationIndex !== -1) {
-                        this.annotations[annotationIndex].id = savedAnnotation.id;
-                        this.annotations[annotationIndex].reading_order = savedAnnotation.reading_order;
-                        rect.annotationId = savedAnnotation.id;
+                if (this.isBrowserCacheMode) {
+                    // Save to IndexedDB in browser cache mode
+                    try {
+                        const savedAnnotation = await this.localStorage.add('annotations', annotationData);
+                        
+                        // Update local annotation with real ID
+                        const annotationIndex = this.annotations.findIndex(a => a.id === tempId);
+                        if (annotationIndex !== -1) {
+                            this.annotations[annotationIndex].id = savedAnnotation.id;
+                            this.annotations[annotationIndex].reading_order = savedAnnotation.reading_order;
+                            rect.annotationId = savedAnnotation.id;
+                        }
+                        
+                        successCount++;
+                    } catch (error) {
+                        console.error('Failed to save detected annotation to IndexedDB:', error);
+                        // Remove from local array and canvas if save failed
+                        const failedIndex = this.annotations.findIndex(a => a.id === tempId);
+                        if (failedIndex !== -1) {
+                            this.annotations.splice(failedIndex, 1);
+                        }
+                        this.canvas.remove(rect);
                     }
-                    
-                    successCount++;
                 } else {
-                    console.error('Failed to save detected annotation:', await response.text());
-                    // Remove from local array and canvas if save failed
-                    const failedIndex = this.annotations.findIndex(a => a.id === tempId);
-                    if (failedIndex !== -1) {
-                        this.annotations.splice(failedIndex, 1);
+                    // Save to server in normal mode
+                    const response = await fetch(`${this.apiBaseUrl}/annotations/`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Token ${this.authToken}`
+                        },
+                        body: JSON.stringify(annotationData)
+                    });
+
+                    if (response.ok) {
+                        const savedAnnotation = await response.json();
+                        
+                        // Update local annotation with real ID
+                        const annotationIndex = this.annotations.findIndex(a => a.id === tempId);
+                        if (annotationIndex !== -1) {
+                            this.annotations[annotationIndex].id = savedAnnotation.id;
+                            this.annotations[annotationIndex].reading_order = savedAnnotation.reading_order;
+                            rect.annotationId = savedAnnotation.id;
+                        }
+                        
+                        successCount++;
+                    } else {
+                        console.error('Failed to save detected annotation:', await response.text());
+                        // Remove from local array and canvas if save failed
+                        const failedIndex = this.annotations.findIndex(a => a.id === tempId);
+                        if (failedIndex !== -1) {
+                            this.annotations.splice(failedIndex, 1);
+                        }
+                        this.canvas.remove(rect);
                     }
-                    this.canvas.remove(rect);
                 }
 
             } catch (error) {

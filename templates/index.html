@@ -714,6 +714,17 @@
                         </div>
                     </div>
                     
+                    <div class="mb-3">
+                        <label for="confidenceThreshold" class="form-label">
+                            <strong>Confidence Threshold</strong>
+                        </label>
+                        <div class="input-group">
+                            <input type="range" class="form-range" id="confidenceThreshold" min="0" max="1" step="0.05" value="0.4">
+                            <span class="input-group-text" id="confidenceValue">40%</span>
+                        </div>
+                        <div class="form-text">Only show detections with confidence above this threshold</div>
+                    </div>
+                    
                     <div id="detectionFilterOptions" style="display: none;">
                         <div class="row">
                             <div class="col-md-6">
