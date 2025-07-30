@@ -3500,33 +3500,49 @@ class OCRApp {
     }
 
     async transcribeWithOpenAI(imageDataUrl, requestData) {
+        // Optimize image for OpenAI API (max 20MB, recommended 2048px max dimension)
+        const optimizedImageUrl = await this.optimizeImageForAPI(imageDataUrl, 2048);
+        
+        const payload = {
+            model: requestData.api_model,
+            messages: [
+                {
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'text',
+                            text: requestData.custom_prompt
+                        },
+                        {
+                            type: 'image_url',
+                            image_url: {
+                                url: optimizedImageUrl
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens: 1000
+        };
+        
+        // Add structured output for metadata extraction (matches server behavior)
+        if (requestData.use_structured_output && requestData.metadata_schema) {
+            payload.response_format = {
+                type: 'json_schema',
+                json_schema: {
+                    name: 'transcription_with_metadata',
+                    schema: requestData.metadata_schema
+                }
+            };
+        }
+        
         const response = await fetch('https://api.openai.com/v1/chat/completions', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${requestData.openai_api_key}`
             },
-            body: JSON.stringify({
-                model: requestData.api_model,
-                messages: [
-                    {
-                        role: 'user',
-                        content: [
-                            {
-                                type: 'text',
-                                text: requestData.custom_prompt
-                            },
-                            {
-                                type: 'image_url',
-                                image_url: {
-                                    url: imageDataUrl
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens: 1000
-            })
+            body: JSON.stringify(payload)
         });
 
         if (!response.ok) {
@@ -3547,16 +3563,86 @@ class OCRApp {
             throw new Error('Invalid response format from OpenAI');
         }
         
+        // Extract text and metadata from response (matches server behavior)
+        let text_content = "";
+        let metadata = {};
+        const content = data.choices[0].message.content;
+        
+        if (requestData.use_structured_output && requestData.metadata_schema) {
+            try {
+                // Parse JSON response for structured output
+                const parsed_content = JSON.parse(content);
+                text_content = parsed_content.text || '';
+                metadata = parsed_content.metadata || {};
+                console.log('Extracted metadata from structured output:', metadata);
+            } catch (error) {
+                console.warn('Failed to parse structured output, using as plain text:', error);
+                // Fallback to plain text if JSON parsing fails
+                text_content = content;
+            }
+        } else {
+            text_content = content;
+        }
+        
         return {
-            text_content: data.choices[0].message.content,
+            text_content: text_content,
+            metadata: metadata,
             api_response_raw: data,
             confidence_score: null
         };
     }
 
+    async optimizeImageForAPI(imageDataUrl, maxDimension = 2048, quality = 0.8) {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                
+                // Calculate new dimensions maintaining aspect ratio
+                let { width, height } = img;
+                
+                if (width > maxDimension || height > maxDimension) {
+                    if (width > height) {
+                        height = (height * maxDimension) / width;
+                        width = maxDimension;
+                    } else {
+                        width = (width * maxDimension) / height;
+                        height = maxDimension;
+                    }
+                }
+                
+                canvas.width = width;
+                canvas.height = height;
+                
+                // Draw image with new dimensions
+                ctx.drawImage(img, 0, 0, width, height);
+                
+                // Convert to optimized JPEG with specified quality (matches server behavior)
+                const optimizedDataUrl = canvas.toDataURL('image/jpeg', quality);
+                
+                console.log(`Image optimized: ${img.width}x${img.height} -> ${width}x${height}`);
+                console.log(`Size reduced: ${Math.round(imageDataUrl.length / 1024)}KB -> ${Math.round(optimizedDataUrl.length / 1024)}KB`);
+                console.log(`Format: JPEG quality ${quality * 100}%`);
+                
+                resolve(optimizedDataUrl);
+            };
+            
+            img.onerror = () => {
+                console.warn('Image optimization failed, using original');
+                resolve(imageDataUrl);
+            };
+            
+            img.src = imageDataUrl;
+        });
+    }
+
     async transcribeWithVertexAI(imageDataUrl, requestData) {
+        // Optimize image for Vertex AI (similar limits to OpenAI)
+        const optimizedImageUrl = await this.optimizeImageForAPI(imageDataUrl, 2048);
+        
         // Remove data URL prefix to get base64
-        const base64Image = imageDataUrl.split(',')[1];
+        const base64Image = optimizedImageUrl.split(',')[1];
         
         // Clean up the model name - remove 'google/' prefix if present
         const modelName = requestData.vertex_model.replace('google/', '');
@@ -3609,8 +3695,11 @@ class OCRApp {
     }
 
     async transcribeWithCustomEndpoint(imageDataUrl, requestData) {
+        // Optimize image for custom endpoint
+        const optimizedImageUrl = await this.optimizeImageForAPI(imageDataUrl, 2048);
+        
         // Convert to blob for custom endpoint
-        const response = await fetch(imageDataUrl);
+        const response = await fetch(optimizedImageUrl);
         const blob = await response.blob();
         
         const formData = new FormData();
@@ -6065,23 +6154,45 @@ class OCRApp {
         try {
             const annotation = this.annotations.find(a => a.id === annotationId);
             if (annotation && annotation.transcription) {
-                // Update transcription in backend
-                const response = await fetch(`${this.apiBaseUrl}/transcriptions/${annotation.transcription.id}/`, {
-                    method: 'PATCH',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Token ${this.authToken}`
-                    },
-                    body: JSON.stringify({ text_content: newText })
-                });
-
-                if (response.ok) {
-                    // Update local annotation
-                    annotation.transcription.text_content = newText;
-                    return true; // Indicate success
+                if (this.isBrowserCacheMode) {
+                    // Update transcription in browser cache
+                    try {
+                        annotation.transcription.text_content = newText;
+                        
+                        // Find and update the transcription in IndexedDB
+                        const transcriptionId = annotation.transcription.id;
+                        const transcription = await this.localStorage.get('transcriptions', transcriptionId);
+                        if (transcription) {
+                            transcription.text_content = newText;
+                            transcription.updated_at = new Date().toISOString();
+                            await this.localStorage.update('transcriptions', transcription);
+                        }
+                        
+                        return true; // Indicate success
+                    } catch (error) {
+                        console.error('Failed to update transcription in browser cache:', error);
+                        this.showAlert('Failed to update transcription', 'danger');
+                        return false;
+                    }
                 } else {
-                    this.showAlert('Failed to update transcription', 'danger');
-                    return false;
+                    // Update transcription in backend
+                    const response = await fetch(`${this.apiBaseUrl}/transcriptions/${annotation.transcription.id}/`, {
+                        method: 'PATCH',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Token ${this.authToken}`
+                        },
+                        body: JSON.stringify({ text_content: newText })
+                    });
+
+                    if (response.ok) {
+                        // Update local annotation
+                        annotation.transcription.text_content = newText;
+                        return true; // Indicate success
+                    } else {
+                        this.showAlert('Failed to update transcription', 'danger');
+                        return false;
+                    }
                 }
             }
             return true; // No transcription to update
@@ -6408,46 +6519,106 @@ class OCRApp {
             });
             
             // Save annotation changes
-            const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
-                method: 'PATCH',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Token ${this.authToken}`
-                },
-                body: JSON.stringify({
-                    classification: classification,
-                    label: label,
-                    metadata: metadata
-                })
-            });
-            
-            if (response.ok) {
-                // Update local annotation
+            if (this.isBrowserCacheMode) {
+                // Update annotation in browser cache
                 annotation.classification = classification;
                 annotation.label = label;
                 annotation.metadata = metadata;
                 
-                // Save transcription if it was edited
-                const transcriptionSaved = await this.saveTranscriptionEdit(annotationId);
-                
-                // Reset edit state
-                this.currentlyEditingId = null;
-                this.hasUnsavedChanges = false;
-                this.originalFormData = null;
-                
-                // Cancel editing mode and refresh UI
-                this.cancelInlineEdit(annotationId);
-                this.updateCombinedTranscription();
-                
-                if (transcriptionSaved) {
-                    this.showAlert('All changes saved successfully!', 'success');
-                } else {
-                    this.showAlert('Annotation updated, but transcription save failed', 'warning');
+                try {
+                    // Ensure annotation has required fields for IndexedDB
+                    if (!annotation.id) {
+                        throw new Error('Annotation missing required id field');
+                    }
+                    
+                    // Create a clean copy without fabricObject for IndexedDB storage
+                    const cleanAnnotation = {
+                        id: annotation.id,
+                        image_id: annotation.image_id || annotation.image,
+                        annotation_type: annotation.type,
+                        coordinates: annotation.coordinates,
+                        classification: classification,
+                        label: label,
+                        reading_order: annotation.reading_order,
+                        metadata: metadata,
+                        created_at: annotation.created_at,
+                        updated_at: new Date().toISOString()
+                    };
+                    
+                    await this.localStorage.update('annotations', cleanAnnotation);
+                    
+                    // Update the in-memory annotation object (keeping fabricObject)
+                    annotation.classification = classification;
+                    annotation.label = label;
+                    annotation.metadata = metadata;
+                    annotation.updated_at = cleanAnnotation.updated_at;
+                    
+                    // Save transcription if it was edited
+                    const transcriptionSaved = await this.saveTranscriptionEdit(annotationId);
+                    
+                    // Reset edit state
+                    this.currentlyEditingId = null;
+                    this.hasUnsavedChanges = false;
+                    this.originalFormData = null;
+                    
+                    // Cancel editing mode and refresh UI
+                    this.cancelInlineEdit(annotationId);
+                    this.updateCombinedTranscription();
+                    
+                    if (transcriptionSaved) {
+                        this.showAlert('All changes saved successfully!', 'success');
+                    } else {
+                        this.showAlert('Annotation updated, but transcription save failed', 'warning');
+                    }
+                    
+                    return true; // Indicate successful save
+                } catch (error) {
+                    console.error('Browser cache update error:', error);
+                    throw new Error('Failed to update annotation in browser cache');
                 }
-                
-                return true; // Indicate successful save
             } else {
-                throw new Error('Failed to update annotation');
+                // Update annotation on server
+                const response = await fetch(`${this.apiBaseUrl}/annotations/${annotationId}/`, {
+                    method: 'PATCH',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Token ${this.authToken}`
+                    },
+                    body: JSON.stringify({
+                        classification: classification,
+                        label: label,
+                        metadata: metadata
+                    })
+                });
+                
+                if (response.ok) {
+                    // Update local annotation
+                    annotation.classification = classification;
+                    annotation.label = label;
+                    annotation.metadata = metadata;
+                    
+                    // Save transcription if it was edited
+                    const transcriptionSaved = await this.saveTranscriptionEdit(annotationId);
+                    
+                    // Reset edit state
+                    this.currentlyEditingId = null;
+                    this.hasUnsavedChanges = false;
+                    this.originalFormData = null;
+                    
+                    // Cancel editing mode and refresh UI
+                    this.cancelInlineEdit(annotationId);
+                    this.updateCombinedTranscription();
+                    
+                    if (transcriptionSaved) {
+                        this.showAlert('All changes saved successfully!', 'success');
+                    } else {
+                        this.showAlert('Annotation updated, but transcription save failed', 'warning');
+                    }
+                    
+                    return true; // Indicate successful save
+                } else {
+                    throw new Error('Failed to update annotation');
+                }
             }
         } catch (error) {
             console.error('Error saving inline edit:', error);
