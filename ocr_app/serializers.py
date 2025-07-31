@@ -1,18 +1,76 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.hashers import make_password
 from django.core.exceptions import ValidationError
 from .models import (
-    UserProfile, Project, ProjectPermission, Document, 
+    AccountRequest, UserProfile, Project, ProjectPermission, Document, 
     Image, Annotation, Transcription, ExportJob
 )
+
+
+class AccountRequestSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(write_only=True, validators=[validate_password])
+    password_confirm = serializers.CharField(write_only=True)
+    
+    class Meta:
+        model = AccountRequest
+        fields = [
+            'username', 'email', 'first_name', 'last_name', 
+            'password', 'password_confirm', 'request_reason'
+        ]
+    
+    def validate(self, attrs):
+        # Check password confirmation
+        if attrs['password'] != attrs['password_confirm']:
+            raise serializers.ValidationError({"password": "Password fields didn't match."})
+        
+        # Check if username already exists in pending requests
+        if AccountRequest.objects.filter(
+            username=attrs['username'], 
+            status='pending'
+        ).exists():
+            raise serializers.ValidationError({
+                "username": "An account request with this username is already pending review."
+            })
+        
+        # Check if username is already taken by existing users
+        if User.objects.filter(username=attrs['username']).exists():
+            raise serializers.ValidationError({
+                "username": "This username is already taken."
+            })
+        
+        # Check if email is already taken
+        if User.objects.filter(email=attrs['email']).exists():
+            raise serializers.ValidationError({
+                "email": "This email is already registered."
+            })
+        
+        # Check if email already has a pending request
+        if AccountRequest.objects.filter(
+            email=attrs['email'], 
+            status='pending'
+        ).exists():
+            raise serializers.ValidationError({
+                "email": "An account request with this email is already pending review."
+            })
+        
+        return attrs
+    
+    def create(self, validated_data):
+        # Remove password confirmation and hash the password
+        validated_data.pop('password_confirm')
+        password = validated_data.pop('password')
+        validated_data['password_hash'] = make_password(password)
+        
+        return AccountRequest.objects.create(**validated_data)
 
 
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'date_joined']
-        read_only_fields = ['id', 'date_joined']
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'date_joined', 'is_staff']
+        read_only_fields = ['id', 'date_joined', 'is_staff']
 
 
 class UserProfileSerializer(serializers.ModelSerializer):

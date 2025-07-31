@@ -2,6 +2,7 @@ from django.db import models
 from django.contrib.auth.models import User
 from django.core.validators import FileExtensionValidator
 from django.utils import timezone
+from django.core.exceptions import ValidationError
 import json
 import uuid
 
@@ -58,6 +59,55 @@ PAGEXML_MAPPINGS = {
     'InterlinearLine': 'TextLine',
     'MusicLine': 'TextLine',
 }
+
+
+class AccountRequest(models.Model):
+    """Model to store pending account requests"""
+    STATUS_CHOICES = [
+        ('pending', 'Pending Review'),
+        ('approved', 'Approved'),
+        ('denied', 'Denied'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    username = models.CharField(max_length=150, unique=True)
+    email = models.EmailField()
+    first_name = models.CharField(max_length=30, blank=True)
+    last_name = models.CharField(max_length=150, blank=True)
+    password_hash = models.CharField(max_length=128)  # Store hashed password
+    
+    # Request details
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
+    requested_at = models.DateTimeField(auto_now_add=True)
+    
+    # Admin action details
+    reviewed_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='reviewed_requests'
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    admin_notes = models.TextField(blank=True, help_text="Admin notes about this request")
+    
+    # Optional: reason for request
+    request_reason = models.TextField(
+        blank=True, 
+        help_text="User's reason for requesting an account"
+    )
+    
+    class Meta:
+        ordering = ['-requested_at']
+    
+    def __str__(self):
+        return f"{self.username} - {self.get_status_display()}"
+    
+    def clean(self):
+        # Check if username is already taken by existing users
+        if User.objects.filter(username=self.username).exists():
+            raise ValidationError({'username': 'This username is already taken.'})
+        
+        # Check if email is already taken by existing users
+        if User.objects.filter(email=self.email).exists():
+            raise ValidationError({'email': 'This email is already registered.'})
 
 
 class UserProfile(models.Model):

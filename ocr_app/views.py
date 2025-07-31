@@ -11,6 +11,7 @@ from PIL import Image as PILImage
 from django.shortcuts import render, get_object_or_404
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
+from django.contrib.auth.hashers import check_password
 from django.http import JsonResponse, HttpResponse, Http404
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -34,12 +35,12 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
 from .models import (
-    UserProfile, Project, ProjectPermission, Document, 
+    AccountRequest, UserProfile, Project, ProjectPermission, Document, 
     Image, Annotation, Transcription, ExportJob,
     ZONE_TYPES, LINE_TYPES, PAGEXML_MAPPINGS
 )
 from .serializers import (
-    UserSerializer, UserProfileSerializer, UserRegistrationSerializer,
+    AccountRequestSerializer, UserSerializer, UserProfileSerializer, UserRegistrationSerializer,
     ProjectListSerializer, ProjectDetailSerializer, ProjectPermissionSerializer,
     DocumentListSerializer, DocumentDetailSerializer,
     ImageListSerializer, ImageDetailSerializer, 
@@ -50,21 +51,152 @@ from .services import OCRService, ExportService, RoboflowDetectionService, Impor
 from .permissions import IsOwnerOrSharedUser, IsApprovedUser
 
 
-class UserRegistrationView(APIView):
-    """User registration endpoint - creates pending approval account"""
+class AccountRequestView(APIView):
+    """Submit account request for admin approval"""
     permission_classes = [AllowAny]
     
     def post(self, request):
-        serializer = UserRegistrationSerializer(data=request.data)
+        serializer = AccountRequestSerializer(data=request.data)
         if serializer.is_valid():
-            user = serializer.save()
-            # UserProfile is automatically created via signals
+            account_request = serializer.save()
             return Response({
-                'message': 'Registration successful. Your account is pending admin approval.',
-                'user_id': user.id,
-                'username': user.username
+                'message': 'Account request submitted successfully. Please wait for admin approval.',
+                'request_id': str(account_request.id),
+                'status': 'pending'
             }, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AccountRequestAdminView(APIView):
+    """Admin view for managing account requests"""
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        # Only allow staff users to view requests
+        if not request.user.is_staff:
+            return Response({
+                'error': 'Only staff members can view account requests'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Get all pending requests by default, or filter by status
+        status_filter = request.query_params.get('status', 'pending')
+        requests_qs = AccountRequest.objects.all()
+        
+        if status_filter and status_filter != 'all':
+            requests_qs = requests_qs.filter(status=status_filter)
+        
+        requests_data = []
+        for req in requests_qs:
+            requests_data.append({
+                'id': str(req.id),
+                'username': req.username,
+                'email': req.email,
+                'first_name': req.first_name,
+                'last_name': req.last_name,
+                'request_reason': req.request_reason,
+                'status': req.status,
+                'requested_at': req.requested_at.isoformat(),
+                'reviewed_by': req.reviewed_by.username if req.reviewed_by else None,
+                'reviewed_at': req.reviewed_at.isoformat() if req.reviewed_at else None,
+                'admin_notes': req.admin_notes
+            })
+        
+        return Response({
+            'requests': requests_data,
+            'total': len(requests_data)
+        })
+    
+    def post(self, request):
+        # Handle approve/deny actions
+        if not request.user.is_staff:
+            return Response({
+                'error': 'Only staff members can manage account requests'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        request_id = request.data.get('request_id')
+        action = request.data.get('action')  # 'approve' or 'deny'
+        admin_notes = request.data.get('admin_notes', '')
+        
+        if not request_id or not action:
+            return Response({
+                'error': 'request_id and action are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if action not in ['approve', 'deny']:
+            return Response({
+                'error': 'action must be "approve" or "deny"'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            account_request = AccountRequest.objects.get(id=request_id, status='pending')
+        except AccountRequest.DoesNotExist:
+            return Response({
+                'error': 'Account request not found or already processed'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        if action == 'approve':
+            # Create the user account
+            try:
+                with transaction.atomic():
+                    user = User.objects.create_user(
+                        username=account_request.username,
+                        email=account_request.email,
+                        first_name=account_request.first_name,
+                        last_name=account_request.last_name,
+                        password=None  # We'll set the password from the hash
+                    )
+                    
+                    # Set the pre-hashed password
+                    user.password = account_request.password_hash
+                    user.save()
+                    
+                    # Approve the user profile (created by signal)
+                    profile = user.profile
+                    profile.is_approved = True
+                    profile.approved_by = request.user
+                    profile.approved_at = timezone.now()
+                    profile.save()
+                    
+                    # Update the request
+                    account_request.status = 'approved'
+                    account_request.reviewed_by = request.user
+                    account_request.reviewed_at = timezone.now()
+                    account_request.admin_notes = admin_notes
+                    account_request.save()
+                    
+                    return Response({
+                        'message': f'Account request for {account_request.username} approved successfully',
+                        'user_id': user.id
+                    })
+                    
+            except Exception as e:
+                return Response({
+                    'error': f'Failed to create user account: {str(e)}'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        else:  # deny
+            account_request.status = 'denied'
+            account_request.reviewed_by = request.user
+            account_request.reviewed_at = timezone.now()
+            account_request.admin_notes = admin_notes
+            account_request.save()
+            
+            return Response({
+                'message': f'Account request for {account_request.username} denied'
+            })
+
+
+class UserRegistrationView(APIView):
+    """DEPRECATED: Use AccountRequestView instead"""
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        # Redirect to account request system
+        return Response({
+            'error': 'Direct registration is disabled. Please use the account request system.',
+            'message': 'Submit an account request for admin approval.',
+            'redirect_to_account_request': True
+        }, status=status.HTTP_400_BAD_REQUEST)
 
 
 @method_decorator(csrf_exempt, name='dispatch')

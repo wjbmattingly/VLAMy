@@ -1341,7 +1341,8 @@ class OCRApp {
             username: document.getElementById('regUsername').value,
             email: document.getElementById('regEmail').value,
             password: document.getElementById('regPassword').value,
-            password_confirm: document.getElementById('regPasswordConfirm').value
+            password_confirm: document.getElementById('regPasswordConfirm').value,
+            request_reason: document.getElementById('regRequestReason').value
         };
 
         if (formData.password !== formData.password_confirm) {
@@ -1351,7 +1352,7 @@ class OCRApp {
 
         try {
             this.showLoading(true);
-            const response = await fetch(`${this.apiBaseUrl}/auth/register/`, {
+            const response = await fetch(`${this.apiBaseUrl}/auth/request-account/`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -1362,14 +1363,53 @@ class OCRApp {
             if (response.ok) {
                 const data = await response.json();
                 this.showAlert(data.message, 'success');
-                this.showLogin();
+                
+                // Clear the form
+                document.getElementById('registerForm').reset();
+                
+                // Show additional info about the approval process
+                setTimeout(() => {
+                    this.showAlert('Your account request has been submitted successfully. You will receive an email notification once your account is approved by an administrator.', 'info');
+                }, 2000);
+                
+                // Optionally redirect to login after a delay
+                setTimeout(() => {
+                    this.showLogin();
+                }, 4000);
             } else {
                 const error = await response.json();
-                this.showAlert(Object.values(error).flat().join(' '), 'danger');
+                
+                // Handle specific error cases
+                if (error.redirect_to_account_request) {
+                    this.showAlert('Registration system has been updated. Please use the account request form.', 'info');
+                    return;
+                }
+                
+                // Handle validation errors
+                let errorMessage = '';
+                if (typeof error === 'object') {
+                    // Handle field-specific errors
+                    for (const [field, messages] of Object.entries(error)) {
+                        if (Array.isArray(messages)) {
+                            errorMessage += messages.join(' ') + ' ';
+                        } else {
+                            errorMessage += messages + ' ';
+                        }
+                    }
+                } else {
+                    errorMessage = error.message || 'Registration failed. Please try again.';
+                }
+                
+                this.showAlert(errorMessage.trim(), 'danger');
             }
         } catch (error) {
             console.error('Registration error:', error);
-            this.showAlert('Registration failed. Please try again.', 'danger');
+            // Check if it's a JSON parsing error (which was the original issue)
+            if (error.message && error.message.includes('Unexpected token')) {
+                this.showAlert('Server returned an unexpected response. Please try again or contact support.', 'danger');
+            } else {
+                this.showAlert('Registration failed. Please check your connection and try again.', 'danger');
+            }
         } finally {
             this.showLoading(false);
         }
@@ -1497,15 +1537,23 @@ class OCRApp {
         document.getElementById('welcomeScreen').style.display = 'block';
         document.getElementById('loginScreen').style.display = 'none';
         document.getElementById('registerScreen').style.display = 'none';
+        document.getElementById('adminScreen').style.display = 'none';
         document.getElementById('appInterface').style.display = 'none';
         document.getElementById('userMenu').style.display = 'none';
         document.getElementById('loginButton').style.display = 'block';
+        
+        // Hide admin nav
+        const adminNav = document.getElementById('adminNav');
+        if (adminNav) {
+            adminNav.style.display = 'none';
+        }
     }
 
     showLogin() {
         document.getElementById('welcomeScreen').style.display = 'none';
         document.getElementById('loginScreen').style.display = 'block';
         document.getElementById('registerScreen').style.display = 'none';
+        document.getElementById('adminScreen').style.display = 'none';
         document.getElementById('appInterface').style.display = 'none';
     }
 
@@ -1513,6 +1561,7 @@ class OCRApp {
         document.getElementById('welcomeScreen').style.display = 'none';
         document.getElementById('loginScreen').style.display = 'none';
         document.getElementById('registerScreen').style.display = 'block';
+        document.getElementById('adminScreen').style.display = 'none';
         document.getElementById('appInterface').style.display = 'none';
     }
 
@@ -1523,9 +1572,18 @@ class OCRApp {
         document.getElementById('welcomeScreen').style.display = 'none';
         document.getElementById('loginScreen').style.display = 'none';
         document.getElementById('registerScreen').style.display = 'none';
+        document.getElementById('adminScreen').style.display = 'none';
         document.getElementById('appInterface').style.display = 'block';
         document.getElementById('userMenu').style.display = 'block';
         document.getElementById('loginButton').style.display = 'none';
+        
+        // Show/hide admin navigation based on user privileges
+        const adminNav = document.getElementById('adminNav');
+        if (adminNav && this.currentUser && this.currentUser.user.is_staff) {
+            adminNav.style.display = 'block';
+        } else if (adminNav) {
+            adminNav.style.display = 'none';
+        }
         
         // Show/hide navigation items based on mode
         if (this.isBrowserCacheMode) {
@@ -3714,10 +3772,7 @@ class OCRApp {
         if (requestData.use_structured_output && requestData.metadata_schema) {
             payload.response_format = {
                 type: 'json_schema',
-                json_schema: {
-                    name: 'transcription_with_metadata',
-                    schema: requestData.metadata_schema
-                }
+                json_schema: requestData.metadata_schema
             };
         }
         
@@ -6310,7 +6365,7 @@ class OCRApp {
         if (target.tagName === 'BUTTON' || 
             target.tagName === 'I' || 
             target.tagName === 'TEXTAREA' ||
-            target.closest('button') || 
+            target.closest('button') ||
             target.closest('.btn-group') ||
             target.closest('.transcription-edit-form') ||
             target.closest('.inline-edit-form')) {
@@ -12530,10 +12585,7 @@ class OCRApp {
                 if (item.metadata_fields && item.metadata_fields.length > 0) {
                     requestBody.response_format = {
                         type: "json_schema",
-                        json_schema: {
-                            name: "transcription_with_metadata",
-                            schema: this.createMetadataSchema(item.metadata_fields)
-                        }
+                        json_schema: this.createMetadataSchema(item.metadata_fields)
                     };
                 }
 
@@ -13897,3 +13949,190 @@ function toggleCustomZones(enabled) {
 function parseModelResponseJson(response) {
     return app.parseModelResponseJson(response);
 }
+
+// Admin Panel Functions
+function showAdminPanel() {
+    // Check if user has admin privileges
+    if (!app.currentUser || !app.currentUser.user.is_staff) {
+        app.showAlert('Access denied. Admin privileges required.', 'danger');
+        return;
+    }
+    
+    hideAllScreens();
+    document.getElementById('adminScreen').style.display = 'block';
+    loadAccountRequests();
+}
+
+function hideAllScreens() {
+    const screens = ['welcomeScreen', 'loginScreen', 'registerScreen', 'adminScreen', 'appInterface'];
+    screens.forEach(screen => {
+        const element = document.getElementById(screen);
+        if (element) {
+            element.style.display = 'none';
+        }
+    });
+}
+
+async function loadAccountRequests() {
+    const container = document.getElementById('accountRequestsContainer');
+    const statusFilter = document.querySelector('input[name="statusFilter"]:checked')?.value || 'pending';
+    
+    // Show loading
+    container.innerHTML = `
+        <div class="text-center py-4">
+            <div class="spinner-border" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p class="mt-2">Loading account requests...</p>
+        </div>
+    `;
+    
+    try {
+        const response = await fetch(`${app.apiBaseUrl}/admin/account-requests/?status=${statusFilter}`, {
+            headers: {
+                'Authorization': `Token ${app.authToken}`,
+                'Content-Type': 'application/json'
+            }
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            displayAccountRequests(data.requests);
+        } else {
+            const error = await response.json();
+            container.innerHTML = `
+                <div class="alert alert-danger">
+                    <i class="fas fa-exclamation-triangle me-2"></i>
+                    Error loading account requests: ${error.error || 'Unknown error'}
+                </div>
+            `;
+        }
+    } catch (error) {
+        console.error('Error loading account requests:', error);
+        container.innerHTML = `
+            <div class="alert alert-danger">
+                <i class="fas fa-exclamation-triangle me-2"></i>
+                Failed to load account requests. Please try again.
+            </div>
+        `;
+    }
+}
+
+function displayAccountRequests(requests) {
+    const container = document.getElementById('accountRequestsContainer');
+    
+    if (requests.length === 0) {
+        container.innerHTML = `
+            <div class="text-center py-4 text-muted">
+                <i class="fas fa-inbox fa-3x mb-3"></i>
+                <p>No account requests found for the selected status.</p>
+            </div>
+        `;
+        return;
+    }
+    
+    const requestsHtml = requests.map(request => {
+        const statusBadge = getStatusBadge(request.status);
+        const actionButtons = request.status === 'pending' ? `
+            <button class="btn btn-success btn-sm me-2" onclick="processAccountRequest('${request.id}', 'approve')">
+                <i class="fas fa-check me-1"></i>Approve
+            </button>
+            <button class="btn btn-danger btn-sm" onclick="processAccountRequest('${request.id}', 'deny')">
+                <i class="fas fa-times me-1"></i>Deny
+            </button>
+        ` : '';
+        
+        const reviewInfo = request.reviewed_by ? `
+            <small class="text-muted">
+                Reviewed by ${request.reviewed_by} on ${new Date(request.reviewed_at).toLocaleDateString()}
+            </small>
+        ` : '';
+        
+        return `
+            <div class="card mb-3">
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-8">
+                            <h6 class="card-title mb-2">
+                                ${request.username} ${statusBadge}
+                            </h6>
+                            <p class="card-text mb-1">
+                                <strong>Name:</strong> ${request.first_name} ${request.last_name}<br>
+                                <strong>Email:</strong> ${request.email}<br>
+                                <strong>Requested:</strong> ${new Date(request.requested_at).toLocaleDateString()}
+                            </p>
+                            ${request.request_reason ? `
+                                <p class="card-text">
+                                    <strong>Reason:</strong> ${request.request_reason}
+                                </p>
+                            ` : ''}
+                            ${request.admin_notes ? `
+                                <p class="card-text">
+                                    <strong>Admin Notes:</strong> ${request.admin_notes}
+                                </p>
+                            ` : ''}
+                            ${reviewInfo}
+                        </div>
+                        <div class="col-md-4 text-end">
+                            ${actionButtons}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+    
+    container.innerHTML = requestsHtml;
+}
+
+function getStatusBadge(status) {
+    const badges = {
+        'pending': '<span class="badge bg-warning">Pending</span>',
+        'approved': '<span class="badge bg-success">Approved</span>',
+        'denied': '<span class="badge bg-danger">Denied</span>'
+    };
+    return badges[status] || '<span class="badge bg-secondary">Unknown</span>';
+}
+
+async function processAccountRequest(requestId, action) {
+    const adminNotes = action === 'deny' ? prompt('Enter a reason for denial (optional):') : '';
+    
+    if (action === 'deny' && adminNotes === null) {
+        return; // User cancelled
+    }
+    
+    try {
+        const response = await fetch(`${app.apiBaseUrl}/admin/account-requests/`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Token ${app.authToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                request_id: requestId,
+                action: action,
+                admin_notes: adminNotes || ''
+            })
+        });
+        
+        if (response.ok) {
+            const data = await response.json();
+            app.showAlert(data.message, 'success');
+            loadAccountRequests(); // Refresh the list
+        } else {
+            const error = await response.json();
+            app.showAlert(`Error ${action}ing request: ${error.error}`, 'danger');
+        }
+    } catch (error) {
+        console.error(`Error processing account request:`, error);
+        app.showAlert(`Failed to ${action} request. Please try again.`, 'danger');
+    }
+}
+
+// Event listeners for status filter
+document.addEventListener('DOMContentLoaded', function() {
+    const statusFilters = document.querySelectorAll('input[name="statusFilter"]');
+    statusFilters.forEach(filter => {
+        filter.addEventListener('change', loadAccountRequests);
+    });
+});

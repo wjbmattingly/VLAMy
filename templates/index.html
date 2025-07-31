@@ -44,6 +44,11 @@
                             <i class="fas fa-upload me-1"></i>Import
                         </a>
                     </li>
+                    <li class="nav-item" id="adminNav" style="display: none;">
+                        <a class="nav-link" href="#" onclick="showAdminPanel()">
+                            <i class="fas fa-cog me-1"></i>Admin
+                        </a>
+                    </li>
                     <li class="nav-item" id="browserCacheDataNav" style="display: none;">
                         <a class="nav-link" href="#" onclick="app.showBrowserCacheExportModal()">
                             <i class="fas fa-database me-1"></i>Browser Data
@@ -227,12 +232,69 @@
                                     <label for="regPasswordConfirm" class="form-label">Confirm Password</label>
                                     <input type="password" class="form-control" id="regPasswordConfirm" required>
                                 </div>
+                                <div class="mb-3">
+                                    <label for="regRequestReason" class="form-label">Reason for Account Request (Optional)</label>
+                                    <textarea class="form-control" id="regRequestReason" rows="3" placeholder="Please briefly explain why you need access to this system..."></textarea>
+                                    <div class="form-text">Help us understand your use case to expedite the approval process.</div>
+                                </div>
                                 <button type="submit" class="btn btn-primary w-100">
                                     <i class="fas fa-user-plus me-2"></i>Request Account
                                 </button>
                             </form>
                             <div class="text-center mt-3">
                                 <a href="#" onclick="showLogin()">Already have an account? Sign In</a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Admin Panel -->
+        <div id="adminScreen" class="container py-5" style="display: none;">
+            <div class="row justify-content-center">
+                <div class="col-md-10">
+                    <div class="card shadow">
+                        <div class="card-header text-center">
+                            <h4><i class="fas fa-cog me-2"></i>Admin Panel</h4>
+                        </div>
+                        <div class="card-body">
+                            <!-- Account Requests Section -->
+                            <div class="mb-4">
+                                <h5><i class="fas fa-user-plus me-2"></i>Account Requests</h5>
+                                <div class="d-flex justify-content-between align-items-center mb-3">
+                                    <div class="btn-group" role="group">
+                                        <input type="radio" class="btn-check" name="statusFilter" id="pending" value="pending" checked>
+                                        <label class="btn btn-outline-primary" for="pending">Pending</label>
+                                        
+                                        <input type="radio" class="btn-check" name="statusFilter" id="approved" value="approved">
+                                        <label class="btn btn-outline-success" for="approved">Approved</label>
+                                        
+                                        <input type="radio" class="btn-check" name="statusFilter" id="denied" value="denied">
+                                        <label class="btn btn-outline-danger" for="denied">Denied</label>
+                                        
+                                        <input type="radio" class="btn-check" name="statusFilter" id="all" value="all">
+                                        <label class="btn btn-outline-secondary" for="all">All</label>
+                                    </div>
+                                    <button class="btn btn-primary" onclick="loadAccountRequests()">
+                                        <i class="fas fa-refresh me-1"></i>Refresh
+                                    </button>
+                                </div>
+                                
+                                <div id="accountRequestsContainer">
+                                    <div class="text-center py-4">
+                                        <div class="spinner-border" role="status">
+                                            <span class="visually-hidden">Loading...</span>
+                                        </div>
+                                        <p class="mt-2">Loading account requests...</p>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="text-center">
+                                <button class="btn btn-secondary" onclick="showProjects()">
+                                    <i class="fas fa-arrow-left me-1"></i>Back to Projects
+                                </button>
                             </div>
                         </div>
                     </div>

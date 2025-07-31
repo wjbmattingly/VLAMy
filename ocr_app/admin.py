@@ -4,10 +4,136 @@ from django.contrib.auth.models import User
 from django.utils.html import format_html
 from django.urls import reverse
 from django.utils import timezone
+from django.contrib import messages
 from .models import (
-    UserProfile, Project, ProjectPermission, Document, 
+    AccountRequest, UserProfile, Project, ProjectPermission, Document, 
     Image, Annotation, Transcription, ExportJob
 )
+
+
+@admin.register(AccountRequest)
+class AccountRequestAdmin(admin.ModelAdmin):
+    list_display = [
+        'username', 'email', 'get_full_name', 'status', 'requested_at', 
+        'reviewed_by', 'reviewed_at'
+    ]
+    list_filter = ['status', 'requested_at', 'reviewed_at']
+    search_fields = ['username', 'email', 'first_name', 'last_name']
+    readonly_fields = ['requested_at', 'password_hash']
+    
+    fieldsets = (
+        ('Request Information', {
+            'fields': ('username', 'email', 'first_name', 'last_name', 'request_reason', 'requested_at')
+        }),
+        ('Review Information', {
+            'fields': ('status', 'reviewed_by', 'reviewed_at', 'admin_notes')
+        }),
+        ('Technical', {
+            'fields': ('password_hash',),
+            'classes': ('collapse',),
+        }),
+    )
+    
+    actions = ['approve_requests', 'deny_requests']
+    
+    def get_full_name(self, obj):
+        return f"{obj.first_name} {obj.last_name}".strip() or '-'
+    get_full_name.short_description = 'Full Name'
+    
+    def approve_requests(self, request, queryset):
+        approved_count = 0
+        error_count = 0
+        
+        for account_request in queryset.filter(status='pending'):
+            try:
+                # Check if username or email already exists
+                if User.objects.filter(username=account_request.username).exists():
+                    self.message_user(
+                        request, 
+                        f"Username '{account_request.username}' already exists. Skipped.",
+                        level=messages.WARNING
+                    )
+                    continue
+                
+                if User.objects.filter(email=account_request.email).exists():
+                    self.message_user(
+                        request, 
+                        f"Email '{account_request.email}' already exists. Skipped.",
+                        level=messages.WARNING
+                    )
+                    continue
+                
+                # Create the user account
+                user = User.objects.create_user(
+                    username=account_request.username,
+                    email=account_request.email,
+                    first_name=account_request.first_name,
+                    last_name=account_request.last_name,
+                    password=None  # We'll set the password from the hash
+                )
+                
+                # Set the pre-hashed password
+                user.password = account_request.password_hash
+                user.save()
+                
+                # Approve the user profile (created by signal)
+                profile = user.profile
+                profile.is_approved = True
+                profile.approved_by = request.user
+                profile.approved_at = timezone.now()
+                profile.save()
+                
+                # Update the request
+                account_request.status = 'approved'
+                account_request.reviewed_by = request.user
+                account_request.reviewed_at = timezone.now()
+                account_request.save()
+                
+                approved_count += 1
+                
+            except Exception as e:
+                error_count += 1
+                self.message_user(
+                    request, 
+                    f"Error approving {account_request.username}: {str(e)}",
+                    level=messages.ERROR
+                )
+        
+        if approved_count > 0:
+            self.message_user(
+                request, 
+                f'{approved_count} account request(s) approved successfully.',
+                level=messages.SUCCESS
+            )
+        
+        if error_count > 0:
+            self.message_user(
+                request, 
+                f'{error_count} account request(s) failed to approve.',
+                level=messages.ERROR
+            )
+    
+    approve_requests.short_description = "Approve selected account requests"
+    
+    def deny_requests(self, request, queryset):
+        updated = 0
+        for account_request in queryset.filter(status='pending'):
+            account_request.status = 'denied'
+            account_request.reviewed_by = request.user
+            account_request.reviewed_at = timezone.now()
+            if not account_request.admin_notes:
+                account_request.admin_notes = f"Denied by {request.user.username} via admin action"
+            account_request.save()
+            updated += 1
+        
+        if updated > 0:
+            self.message_user(
+                request, 
+                f'{updated} account request(s) denied.',
+                level=messages.SUCCESS
+            )
+    
+    deny_requests.short_description = "Deny selected account requests"
 
 
 class UserProfileInline(admin.StackedInline):

@@ -16,10 +16,14 @@ app_name = 'ocr_app'
 
 urlpatterns = [
     # Authentication endpoints
-    path('auth/register/', views.UserRegistrationView.as_view(), name='register'),
+    path('auth/request-account/', views.AccountRequestView.as_view(), name='request_account'),
+    path('auth/register/', views.UserRegistrationView.as_view(), name='register'),  # Kept for backward compatibility
     path('auth/login/', views.CustomLoginView.as_view(), name='login'),
     path('auth/profile/', views.UserProfileView.as_view(), name='profile'),
     path('auth/credentials/', views.APICredentialsView.as_view(), name='api_credentials'),
+    
+    # Admin endpoints for account management
+    path('admin/account-requests/', views.AccountRequestAdminView.as_view(), name='admin_account_requests'),
     
     # User management
     path('users/search/', views.UserSearchView.as_view(), name='user_search'),
